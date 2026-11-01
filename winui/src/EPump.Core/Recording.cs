@@ -6,8 +6,8 @@ using System.Text.Json.Serialization;
 namespace EPump.Core;
 
 /// <summary>
-/// The per-sample arrays of a recording, in spool-row order. The first five are <c>float64</c>
-/// in the <c>.npz</c>; the rest are 0/1 flags stored as <c>int64</c>.
+/// The per-sample arrays of a recording, in spool-row order. The flags are 0/1 values stored
+/// as <c>int64</c> in the <c>.npz</c>; everything else is <c>float64</c>.
 /// </summary>
 public static class SampleColumns
 {
@@ -15,6 +15,7 @@ public static class SampleColumns
     [
         "t_unix",
         "pressure_psi",
+        "shear_stress_mpa",
         "flow_ml_min",
         "flow_setpoint_ml_min",
         "pressure_limit_psi",
@@ -25,20 +26,25 @@ public static class SampleColumns
         "leak",
     ];
 
-    public const int FloatColumns = 5;
+    private static readonly HashSet<string> Flags =
+        ["running", "fault_motor_stall", "fault_over_pressure", "fault_under_pressure", "leak"];
 
-    public static void ToRow(PumpSample s, Span<double> row)
+    /// <summary>Decided by name rather than position, so a spool written by an older version still recovers correctly.</summary>
+    public static bool IsFlag(string name) => Flags.Contains(name);
+
+    public static void ToRow(PumpSample s, FaultGeometry geometry, Span<double> row)
     {
         row[0] = s.TimeUnix;
         row[1] = s.PressurePsi;
-        row[2] = s.Flow;
-        row[3] = s.FlowSetPoint;
-        row[4] = s.PressureLimitPsi;
-        row[5] = s.Running ? 1 : 0;
-        row[6] = s.Faults.MotorStall ? 1 : 0;
-        row[7] = s.Faults.OverPressure ? 1 : 0;
-        row[8] = s.Faults.UnderPressure ? 1 : 0;
-        row[9] = s.Leak ? 1 : 0;
+        row[2] = geometry.ShearStressMPa(s.PressurePsi);
+        row[3] = s.Flow;
+        row[4] = s.FlowSetPoint;
+        row[5] = s.PressureLimitPsi;
+        row[6] = s.Running ? 1 : 0;
+        row[7] = s.Faults.MotorStall ? 1 : 0;
+        row[8] = s.Faults.OverPressure ? 1 : 0;
+        row[9] = s.Faults.UnderPressure ? 1 : 0;
+        row[10] = s.Leak ? 1 : 0;
     }
 }
 
@@ -51,7 +57,8 @@ public sealed class RecordingManifest
 {
     public const string FileName = "manifest.json";
 
-    public int FormatVersion { get; set; } = 1;
+    /// <summary>2 added <c>shear_stress_mpa</c> and the fault geometry.</summary>
+    public int FormatVersion { get; set; } = 2;
     public string ExperimentSerial { get; set; } = "0000";
     public int Run { get; set; }
     public double StartTimeUnix { get; set; }
@@ -68,7 +75,17 @@ public sealed class RecordingManifest
     public double PressureSetPointPsi { get; set; } = PumpConfig.PressureSetPointPsi;
     public int PollIntervalMs { get; set; } = PumpConfig.PollIntervalMs;
     public string AppVersion { get; set; } = string.Empty;
+
+    /// <summary>"1D" or "2D".</summary>
+    public string FaultType { get; set; } = "1D";
+
+    /// <summary>The effective fault thickness used for the shear stress (2D is always 0.5 m).</summary>
+    public double FaultThicknessM { get; set; } = 0.1;
+
     public string[] Columns { get; set; } = SampleColumns.Names;
+
+    [JsonIgnore]
+    public FaultGeometry Geometry => new(FaultTypeExtensions.Parse(FaultType), FaultThicknessM);
 
     /// <summary><c>T0207-pump-run5-20261101_143000.npz</c>: the NI6451 naming, with <c>pump</c> where it has <c>raw</c>.</summary>
     public string OutputFileName =>
@@ -90,7 +107,7 @@ internal partial class EventJsonContext : JsonSerializerContext
 /// <summary>
 /// Streams one recording to disk while it runs: a <c>samples.f64</c> file of fixed-width rows,
 /// an <c>events.jsonl</c> log and the manifest, in a hidden folder inside the output folder.
-/// Every sample is flushed to the OS as it arrives (it is 80 bytes every half second) and the
+/// Every sample is flushed to the OS as it arrives (it is 88 bytes every half second) and the
 /// file is fsync'd every <see cref="PumpConfig.DurableFlushIntervalSec"/>, so an application
 /// crash loses nothing and a power cut at most a few seconds.
 ///
@@ -107,11 +124,13 @@ public sealed class RecordingSpool : IDisposable
     private readonly StreamWriter _events;
     private readonly double[] _row = new double[SampleColumns.Names.Length];
     private DateTime _lastDurableFlush = DateTime.UtcNow;
+    private readonly FaultGeometry _geometry;
     private bool _closed;
 
     public RecordingSpool(string saveDir, RecordingManifest manifest)
     {
         Manifest = manifest;
+        _geometry = manifest.Geometry;
         Directory = Path.Combine(saveDir, DirPrefix + Path.GetFileNameWithoutExtension(manifest.OutputFileName));
         System.IO.Directory.CreateDirectory(Directory);
 
@@ -133,7 +152,7 @@ public sealed class RecordingSpool : IDisposable
         lock (_gate)
         {
             if (_closed) return;
-            SampleColumns.ToRow(sample, _row);
+            SampleColumns.ToRow(sample, _geometry, _row);
             _samples.Write(MemoryMarshal.AsBytes(_row.AsSpan()));
             SampleCount++;
 
@@ -171,6 +190,14 @@ public sealed class RecordingSpool : IDisposable
         }
     }
 
+    /// <summary>Close and delete the spool: for a recording that should never become a file (the pump did not start).</summary>
+    public void Discard()
+    {
+        Close();
+        try { System.IO.Directory.Delete(Directory, recursive: true); }
+        catch (Exception e) when (e is IOException or UnauthorizedAccessException) { }
+    }
+
     public void Dispose() => Close();
 }
 
@@ -199,10 +226,10 @@ public static class RecordingFinalizer
             {
                 for (int c = 0; c < manifest.Columns.Length; c++)
                 {
-                    if (c < SampleColumns.FloatColumns)
-                        npz.AddFloat64Array(manifest.Columns[c], columns[c]);
-                    else
+                    if (SampleColumns.IsFlag(manifest.Columns[c]))
                         npz.AddInt64Array(manifest.Columns[c], columns[c].Select(v => (long)v).ToArray());
+                    else
+                        npz.AddFloat64Array(manifest.Columns[c], columns[c]);
                 }
 
                 npz.AddFloat64Array("event_t_unix", events.Select(e => e.TimeUnix).ToArray());
@@ -221,6 +248,8 @@ public static class RecordingFinalizer
                 npz.AddFloat64Scalar("pressure_set_point_psi", manifest.PressureSetPointPsi);
                 npz.AddInt64Scalar("poll_interval_ms", manifest.PollIntervalMs);
                 npz.AddString("app_version", manifest.AppVersion);
+                npz.AddString("fault_type", manifest.FaultType);
+                npz.AddFloat64Scalar("fault_thickness_m", manifest.FaultThicknessM);
             }
         }
         catch

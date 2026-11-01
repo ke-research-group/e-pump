@@ -65,6 +65,12 @@ public static class PumpConfig
 
     // ---- recording ----
 
+    /// <summary>
+    /// When the pump stops by itself (a safety stop, a fault, or the front-panel key) the
+    /// recording runs on this long, to capture the pressure decay, and is then saved.
+    /// </summary>
+    public const double RecordTailSeconds = 5;
+
     /// <summary>How often the spool file is fsync'd to the drive (it is flushed to the OS after every sample).</summary>
     public const int DurableFlushIntervalSec = 10;
 

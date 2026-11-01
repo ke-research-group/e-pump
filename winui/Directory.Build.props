@@ -9,7 +9,7 @@
     <TreatWarningsAsErrors>false</TreatWarningsAsErrors>
     <Company>NTU Rock Friction Lab</Company>
     <Product>ReaXus CP Pump Control</Product>
-    <Version>0.1.0</Version>
+    <Version>0.2.0</Version>
   </PropertyGroup>
 
 </Project>

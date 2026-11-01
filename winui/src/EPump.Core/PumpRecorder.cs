@@ -4,8 +4,8 @@ namespace EPump.Core;
 
 /// <summary>
 /// Connects a <see cref="PumpSession"/> to a <see cref="RecordingSpool"/> for the length of one
-/// recording. Recording is independent of the pump: it can start before Run and continue after
-/// Stop, and the pump's own events (runs, stops, safety trips) land in the same event log.
+/// recording. The application starts one just before Run and saves it after the pump stops,
+/// so the pump's own events (run, stop, safety trips) land in the recording's event log.
 /// </summary>
 public sealed class PumpRecorder
 {
@@ -19,7 +19,8 @@ public sealed class PumpRecorder
 
     public RecordingSpool Spool { get; }
 
-    public static PumpRecorder Start(PumpSession session, string saveDir, string experimentSerial, int run, string appVersion)
+    public static PumpRecorder Start(
+        PumpSession session, string saveDir, string experimentSerial, int run, string appVersion, FaultGeometry geometry)
     {
         DateTime startLocal = DateTime.Now;
         var manifest = new RecordingManifest
@@ -34,6 +35,8 @@ public sealed class PumpRecorder
             MaxPressurePsi = session.Info.MaxPressurePsi,
             PressureUnitsNative = session.Info.Units.ToString().ToLowerInvariant(),
             AppVersion = appVersion,
+            FaultType = geometry.Type.ToLabel(),
+            FaultThicknessM = geometry.EffectiveThicknessM,
         };
 
         var recorder = new PumpRecorder(session, new RecordingSpool(saveDir, manifest));
@@ -54,5 +57,13 @@ public sealed class PumpRecorder
         Spool.AppendEvent(new PumpEvent(UnixTime.Now(), EventKinds.RecordStop, $"{Spool.SampleCount} samples"));
         Spool.Close();
         return Spool.Directory;
+    }
+
+    /// <summary>Detach and delete everything recorded: used when the run this recording belonged to never started.</summary>
+    public void Discard()
+    {
+        _session.SampleReceived -= Spool.Append;
+        _session.EventLogged -= Spool.AppendEvent;
+        Spool.Discard();
     }
 }

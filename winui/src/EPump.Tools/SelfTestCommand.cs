@@ -19,6 +19,7 @@ internal static class SelfTestCommand
         TestCommandFormatting();
         TestReplyParsing();
         TestSafetyRules();
+        TestShearStress();
         TestNpyLayout();
         TestRecordingRoundTrip();
         TestCrashRecovery();
@@ -127,6 +128,22 @@ internal static class SelfTestCommand
         Check("... and again after it has cleared", m.Evaluate(Sample(4, 0, 0, running: false, faults: fault)).Tripped);
     }
 
+    // ---------- shear stress ----------
+
+    private static void TestShearStress()
+    {
+        // NI6451's formula: P × piston area / (thickness × 0.5 m), piston area 12.67e-3 m² (×3 for 2D).
+        double p = 1000;   // psi
+        double pa = p * 6894.757293168;
+        Check("1D, 10 cm", Math.Abs(UnitConversion.GetShearStress(p, FaultType.OneD, 0.10) - pa * 12.67e-3 / (0.10 * 0.5)) < 1e-6);
+        Check("1D, 5 cm is twice 10 cm",
+            Math.Abs(UnitConversion.GetShearStress(p, FaultType.OneD, 0.05) - 2 * UnitConversion.GetShearStress(p, FaultType.OneD, 0.10)) < 1e-6);
+        Check("2D ignores the thickness: 3 pistons over 50 cm",
+            Math.Abs(UnitConversion.GetShearStress(p, FaultType.TwoD, 0.05) - pa * 3 * 12.67e-3 / (0.5 * 0.5)) < 1e-6);
+        Check("geometry reports MPa", Math.Abs(new FaultGeometry(FaultType.OneD, 0.10).ShearStressMPa(1000) - 1.7471) < 1e-3);
+        Check("2D effective thickness is 50 cm", new FaultGeometry(FaultType.TwoD, 0.05).EffectiveThicknessM == 0.5);
+    }
+
     // ---------- .npy / .npz ----------
 
     private static void TestNpyLayout()
@@ -179,6 +196,9 @@ internal static class SelfTestCommand
             double[] t = npz.ReadFloat64Array("t_unix");
             Check("all samples saved", t.Length == 10 && t[0] == 1_790_000_001 && t[9] == 1_790_000_005.5);
             Check("pressure saved", npz.ReadFloat64Array("pressure_psi")[9] == 900);
+            Check("shear stress saved with the recording's geometry",
+                Math.Abs(npz.ReadFloat64Array("shear_stress_mpa")[9] - new FaultGeometry(FaultType.OneD, 0.10).ShearStressMPa(900)) < 1e-9);
+            Check("geometry recorded", npz.ReadString("fault_type") == "1D" && npz.ReadFloat64Array("fault_thickness_m") is [0.1]);
             Check("flags are int64", npz.GetHeader("running").Descr == NpyFormat.Int64Descr);
             long[] running = npz.ReadInt64Array("running");
             long[] over = npz.ReadInt64Array("fault_over_pressure");

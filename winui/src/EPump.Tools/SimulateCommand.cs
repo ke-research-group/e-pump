@@ -38,7 +38,7 @@ internal static class SimulateCommand
         if (outDir is not null)
         {
             Directory.CreateDirectory(outDir);
-            recorder = PumpRecorder.Start(session, outDir, "0001", 1, "simulate");
+            recorder = PumpRecorder.Start(session, outDir, "0001", 1, "simulate", new FaultGeometry(FaultType.OneD, 0.10));
         }
 
         await session.StartPumpAsync(flow);

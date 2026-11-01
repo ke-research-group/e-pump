@@ -72,6 +72,9 @@ public sealed class PumpSession : IAsyncDisposable
     /// <summary>One line describing the pump and the link, for the event log.</summary>
     public string ConnectionSummary { get; private set; } = string.Empty;
 
+    /// <summary>The constant-pressure set point (front panel PRESS) as last read back from the pump, psi.</summary>
+    public double PressureSetPointPsi { get; private set; }
+
     /// <summary>The flow the pump last accepted for FI, mL/min.</summary>
     public double FlowSetPoint { get; private set; }
 
@@ -203,6 +206,7 @@ public sealed class PumpSession : IAsyncDisposable
         if (ps > PumpConfig.PressureCapPsi + 0.5 || ps < PumpConfig.PressureSetPointPsi - tolerance)
             throw new InvalidOperationException($"The pump holds a pressure set point of {ps:F0} psi after being sent {PumpConfig.PressureSetPointPsi:F0} psi.");
 
+        PressureSetPointPsi = ps;
         lock (_safetyGate) _safety.PressureLimitPsi = limitPsi;
     }
 

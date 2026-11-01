@@ -19,10 +19,11 @@ namespace EPump.App;
 /// beside the NI6451 window and behave like it: the same rail-and-readout layout, inline
 /// <see cref="InfoBar"/> notifications instead of modal dialogs, and the same run naming.
 ///
-/// Two things are deliberately different. Live monitoring has no button: it starts on Connect
-/// and runs until Disconnect, because the software safety checks only exist while the pump is
-/// being polled. And the pump's Run/Stop are separate from Record/Stop recording, so a
-/// recording can span several runs and a stopped recording never stops the pump.
+/// Live monitoring has no button: it starts on Connect and runs until Disconnect, because the
+/// software safety checks only exist while the pump is being polled. Every run is recorded:
+/// Run starts the recording just before the pump, STOP saves it right after the pump stops,
+/// and if the pump stops by itself the recording runs on for
+/// <see cref="PumpConfig.RecordTailSeconds"/> to catch the pressure decay, then saves.
 /// </summary>
 public sealed partial class MainWindow : Window
 {
@@ -38,6 +39,12 @@ public sealed partial class MainWindow : Window
     private PumpSession? _session;
     private PumpRecorder? _recorder;
     private DateTime _recordStartedUtc;
+
+    /// <summary>The pump has been seen running since this recording started, so a stop now means the run is over.</summary>
+    private bool _sawRunning;
+
+    /// <summary>Set when the pump stopped by itself: the recording is saved at this time.</summary>
+    private DateTime? _tailUntilUtc;
     private string? _saveDir;
     private IReadOnlyList<OrphanedRecording> _orphans = [];
     private string? _lastAlert;
@@ -70,6 +77,10 @@ public sealed partial class MainWindow : Window
         LimitBox.Maximum = PumpConfig.PressureCapPsi;
         LimitBox.Value = _settings.PressureLimitPsi;
         KeypadLockToggle.IsOn = _settings.LockKeypad;
+
+        // Checking a radio button populates the thickness list, which selects the saved thickness.
+        if (_settings.FaultType == "2D") Fault2DRadio.IsChecked = true;
+        else Fault1DRadio.IsChecked = true;
 
         SafetyCaptionText.Text =
             $"The pump's constant-pressure set point is pinned at {PumpConfig.PressureSetPointPsi:F0} psi, the cap, so it "
@@ -238,23 +249,50 @@ public sealed partial class MainWindow : Window
 
     // ---------- pump control ----------
 
+    /// <summary>
+    /// Start the recording first, so it holds the whole run including the start-up transient,
+    /// then start the pump. If the pump does not start, the recording is discarded: it holds no
+    /// run and should not use up a run number.
+    /// </summary>
     private async void OnRunPump(object sender, RoutedEventArgs e)
     {
         if (_session is null || !TryReadFlow(out double flow) || !TryReadLimit(out double limit)) return;
+        if (_saveDir is null)
+        {
+            ShowAlert(InfoBarSeverity.Warning, "No output folder", "Every run is recorded: choose an output folder first.");
+            return;
+        }
 
         _busy = true;
         UpdateControls();
         SafetyBar.IsOpen = false;
+        PumpRecorder? recorder = null;
         try
         {
             if (Math.Abs(limit - _session.PressureLimitPsi) > 0.5) await _session.SetPressureLimitAsync(limit);
+
+            recorder = PumpRecorder.Start(_session, _saveDir, CurrentSerialPadded, CurrentRn, _appVersion, CurrentGeometry);
+            _recorder = recorder;
+            _recordStartedUtc = DateTime.UtcNow;
+            _sawRunning = false;
+            _tailUntilUtc = null;
+            StatsPanel.Visibility = Visibility.Visible;
+
             await _session.StartPumpAsync(flow);
+
             RememberFlowAndLimit(flow, limit);
             ClearAlert();
-            SetStatus($"Running at {flow} mL/min · limit {limit:F0} psi", StatusKind.Running);
+            SetStatus($"Running at {flow} mL/min · limit {limit:F0} psi · recording {recorder.Spool.Manifest.OutputFileName}",
+                StatusKind.Recording);
         }
         catch (Exception ex) when (IsPumpError(ex) || ex is ArgumentException)
         {
+            if (recorder is not null && ReferenceEquals(_recorder, recorder))
+            {
+                recorder.Discard();
+                _recorder = null;
+                StatsPanel.Visibility = Visibility.Collapsed;
+            }
             ShowAlert(InfoBarSeverity.Error, "The pump was not started", ex.Message);
         }
         finally
@@ -264,7 +302,11 @@ public sealed partial class MainWindow : Window
         }
     }
 
-    /// <summary>Never gated on <see cref="_busy"/>: Stop must work while anything else is in flight.</summary>
+    /// <summary>
+    /// Stop the pump, then save the recording. Never gated on <see cref="_busy"/>: Stop must work
+    /// while anything else is in flight. If Stop does not reach the pump, the recording carries on,
+    /// because the pump may still be running.
+    /// </summary>
     private async void OnStopPump(object sender, RoutedEventArgs e)
     {
         if (_session is null) return;
@@ -277,8 +319,19 @@ public sealed partial class MainWindow : Window
         {
             SetStatus("STOP FAILED", StatusKind.Error);
             ShowAlert(InfoBarSeverity.Error, "STOP DID NOT REACH THE PUMP",
-                $"{ex.Message} Stop the pump with the RUN/STOP key on its front panel, or switch it off.");
+                $"{ex.Message} Stop the pump with the RUN/STOP key on its front panel, or switch it off. The recording continues.");
+            return;
         }
+
+        await StopRecordingAsync();
+    }
+
+    /// <summary>The pump stopped by itself: keep recording the pressure decay for a few seconds, then save.</summary>
+    private void BeginRecordingTail(string why)
+    {
+        if (_recorder is null || _tailUntilUtc is not null) return;
+        _tailUntilUtc = DateTime.UtcNow.AddSeconds(PumpConfig.RecordTailSeconds);
+        SetStatus($"{why} · saving the recording in {PumpConfig.RecordTailSeconds:F0} s", StatusKind.Busy);
     }
 
     private async void OnApply(object sender, RoutedEventArgs e)
@@ -371,6 +424,7 @@ public sealed partial class MainWindow : Window
         SafetyBar.Message = verdict.Message;
         SafetyBar.IsOpen = true;
         SetStatus(SafetyBar.Title, StatusKind.Error);
+        BeginRecordingTail(SafetyBar.Title);
         UpdateControls();
     });
 
@@ -410,32 +464,13 @@ public sealed partial class MainWindow : Window
         UpdateControls();
     }
 
-    private void OnRecord(object sender, RoutedEventArgs e)
-    {
-        if (_session is null || _saveDir is null || _recorder is not null) return;
-
-        try
-        {
-            _recorder = PumpRecorder.Start(_session, _saveDir, CurrentSerialPadded, CurrentRn, _appVersion);
-            _recordStartedUtc = DateTime.UtcNow;
-            StatsPanel.Visibility = Visibility.Visible;
-            SetStatus($"Recording {Path.GetFileName(_recorder.Spool.Manifest.OutputFileName)}", StatusKind.Recording);
-        }
-        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
-        {
-            _recorder = null;
-            ShowAlert(InfoBarSeverity.Error, "Could not start recording", ex.Message);
-        }
-        UpdateControls();
-    }
-
-    private async void OnStopRecord(object sender, RoutedEventArgs e) => await StopRecordingAsync();
-
     private async Task StopRecordingAsync()
     {
         PumpRecorder? recorder = _recorder;
         if (recorder is null || _saveDir is null) return;
         _recorder = null;
+        _tailUntilUtc = null;
+        _sawRunning = false;
         StatsPanel.Visibility = Visibility.Collapsed;
         UpdateControls();
 
@@ -554,12 +589,31 @@ public sealed partial class MainWindow : Window
         PumpSample? s = session?.LatestSample;
         int decimals = session?.Info.FlowDecimals ?? 3;
 
+        FaultGeometry geometry = CurrentGeometry;
         PressureText.Text = s is null ? EmptyReadout : s.PressurePsi.ToString("F0", CultureInfo.InvariantCulture);
         FlowText.Text = s is null ? EmptyReadout : s.Flow.ToString("F" + decimals, CultureInfo.InvariantCulture);
         SetFlowText.Text = session is null ? EmptyReadout : session.FlowSetPoint.ToString("F" + decimals, CultureInfo.InvariantCulture);
-        LimitText.Text = session is null ? EmptyReadout : session.PressureLimitPsi.ToString("F0", CultureInfo.InvariantCulture);
+        ShearText.Text = s is null ? EmptyReadout : geometry.ShearStressMPa(s.PressurePsi).ToString("F2", CultureInfo.InvariantCulture);
+        ShearCaptionText.Text = $"SHEAR STRESS · {geometry.Type.ToLabel()} {geometry.EffectiveThicknessM * 100:0} cm";
+
+        PumpPressureSettingsText.Text = session is null
+            ? "Not connected."
+            : $"On the pump now: HI PR {(s?.PressureLimitPsi ?? session.PressureLimitPsi):F0} psi, the stop limit · "
+              + $"PRESS {session.PressureSetPointPsi:F0} psi, the CP set point, pinned so it is never reached.";
 
         SetStateTile(session, s);
+
+        // Every run is recorded; a pump that stops by itself ends the recording after a short tail.
+        if (_recorder is not null && s is not null)
+        {
+            if (s.Running) _sawRunning = true;
+            else if (_sawRunning) BeginRecordingTail("The pump stopped");
+        }
+        if (_tailUntilUtc is DateTime until && DateTime.UtcNow >= until)
+        {
+            _tailUntilUtc = null;
+            _ = StopRecordingAsync();
+        }
 
         PressurePlot.ReferenceValue = session?.PressureLimitPsi;
         FlowPlot.ReferenceValue = session?.FlowSetPoint;
@@ -608,16 +662,60 @@ public sealed partial class MainWindow : Window
         ConnectIcon.Glyph = connected ? "" : "";
 
         ApplyButton.IsEnabled = connected && !_busy;
-        RunPumpButton.IsEnabled = connected && !_busy && !running && !fault;
+        RunPumpButton.IsEnabled = connected && !_busy && !running && !fault && !recording && _saveDir is not null;
         StopPumpButton.IsEnabled = connected;   // always, whatever else is happening
         ClearFaultButton.IsEnabled = connected;
 
-        RecordButton.IsEnabled = connected && _saveDir is not null && !recording;
-        StopRecordButton.IsEnabled = recording;
+        // Everything that goes into the file name or the recording is fixed while one is open.
         ChooseFolderButton.IsEnabled = !recording;
         SerialBox.IsEnabled = !recording;
         RnBox.IsEnabled = !recording;
         SyncNamingButton.IsEnabled = !recording;
+        Fault1DRadio.IsEnabled = !recording;
+        Fault2DRadio.IsEnabled = !recording;
+        FaultThicknessCombo.IsEnabled = !recording && CurrentFaultType == FaultType.OneD;
+    }
+
+    // ---------- fault geometry ----------
+
+    private FaultType CurrentFaultType => Fault2DRadio.IsChecked == true ? FaultType.TwoD : FaultType.OneD;
+
+    private FaultGeometry CurrentGeometry
+    {
+        get
+        {
+            (string Label, double Metres)[] options = UnitConversion.ThicknessOptions(CurrentFaultType);
+            int index = Math.Clamp(FaultThicknessCombo.SelectedIndex, 0, options.Length - 1);
+            return new FaultGeometry(CurrentFaultType, options[index].Metres);
+        }
+    }
+
+    private void OnFaultTypeChanged(object sender, RoutedEventArgs e)
+    {
+        if (FaultThicknessCombo is null) return;
+
+        (string Label, double Metres)[] options = UnitConversion.ThicknessOptions(CurrentFaultType);
+        FaultThicknessCombo.Items.Clear();
+        foreach ((string label, _) in options) FaultThicknessCombo.Items.Add(label);
+
+        int saved = Array.FindIndex(options, o => Math.Abs(o.Metres - _settings.FaultThicknessM) < 1e-9);
+        FaultThicknessCombo.SelectedIndex = saved >= 0 ? saved : 0;
+        FaultThicknessCombo.IsEnabled = CurrentFaultType == FaultType.OneD && _recorder is null;
+        SaveGeometry();
+    }
+
+    private void OnThicknessChanged(object sender, SelectionChangedEventArgs e)
+    {
+        if (FaultThicknessCombo.SelectedIndex >= 0) SaveGeometry();
+    }
+
+    private void SaveGeometry()
+    {
+        FaultGeometry g = CurrentGeometry;
+        _settings.FaultType = g.Type.ToLabel();
+        // 2D has a single, fixed thickness: keep the 1D choice for when 1D is selected again.
+        if (g.Type == FaultType.OneD) _settings.FaultThicknessM = g.ThicknessM;
+        _settings.Save(UserSettings.DefaultPath);
     }
 
     // ---------- status and alerts ----------

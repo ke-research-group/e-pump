@@ -11,7 +11,7 @@ import sys
 
 import numpy as np
 
-FLOAT_COLUMNS = ["t_unix", "pressure_psi", "flow_ml_min", "flow_setpoint_ml_min", "pressure_limit_psi"]
+FLOAT_COLUMNS = ["t_unix", "pressure_psi", "shear_stress_mpa", "flow_ml_min", "flow_setpoint_ml_min", "pressure_limit_psi"]
 FLAG_COLUMNS = ["running", "fault_motor_stall", "fault_over_pressure", "fault_under_pressure", "leak"]
 
 

@@ -16,8 +16,8 @@ The CP Class has no constant-flow mode. It always adjusts its flow, up to the fl
 
 | Layer | What it does |
 | --- | --- |
-| `PS` pinned at 2800 psi | The pump's own target is never below the cap, so it delivers exactly `FI` and does not start throttling before the limit. |
-| Pump upper limit `UP` | Set to the operator's limit (≤ 2800, default 2700). The pump stops itself and faults when the pressure exceeds it. Read back after every write. |
+| `PS` pinned at 2800 psi (front panel **PRESS**, LED solid) | The pump's constant-pressure target is never below the cap, so it delivers exactly `FI` and does not start throttling before the limit. Never changed by the operator. |
+| Pump upper limit `UP` (front panel **HI PR**) | The operator's limit (≤ 2800, default 2700): the pressure at which the pump stops itself and faults. This is the value the window's "Limit · HI PR" changes. Read back after every write. |
 | Software over-pressure stop | Every poll (2 Hz): if the pressure is at or above the limit while running, `ST` is sent at once. |
 | Software flow-deviation stop | If the reported flow stays more than 5 % below the set point for 3 polls, the pump is stopped: it was throttling, so the flow was no longer constant. Suspended for 10 s after Run or a flow change. |
 | Keypad guard | If the pump's `UP` is raised from the front panel, it is put back on the next poll. The keypad can also be locked (`KD`) while connected. |
@@ -55,10 +55,19 @@ Connecting sets the pump's `PS` to 2800 psi and its `UP` to the limit in the win
 
 - **Connect / Disconnect**: polling, the live readout and the safety checks run for as long
   as the pump is connected. There is no separate Monitor button.
-- **Run pump / STOP PUMP**: STOP PUMP is always enabled, even while another command is in
-  flight. **Apply to pump** changes the flow or the limit, including while running.
-- **Record / Stop recording**: these are independent of Run and Stop. A recording can span
-  several runs, and stopping a recording never stops the pump.
+- **Run & record / STOP PUMP**: every run is recorded, so Run needs an output folder.
+  - **Run & record** starts the recording first, then the pump, so the file holds the whole
+    start-up. If the pump does not start, the recording is discarded and no run number is used.
+  - **STOP PUMP** stops the pump and then saves the `.npz`. It is always enabled, even while
+    another command is in flight.
+  - If the pump stops by itself, through a safety stop, a fault or its own RUN/STOP key, the
+    recording runs on for 5 s to capture the pressure decay, then saves.
+  - **Apply to pump** changes the flow or the limit, including while running.
+- **Fault geometry**: choose 1D (5 cm or 10 cm) or 2D (50 cm, fixed), as in NI6451. The
+  **SHEAR STRESS** tile converts the pump pressure into shear stress on the fault with NI6451's
+  formula: pressure × shear-piston area (12.67 × 10⁻³ m²; ×3 for 2D) ÷ (thickness × 0.5 m).
+- The constant-flow card shows the HI PR and PRESS values the pump reports, so they can be
+  compared with its front panel.
 - **Output naming** is read from NI6451's `%LOCALAPPDATA%\Ni6451\naming.json` and never
   written to it:
   - If NI6451 has recorded a run today, the same serial and run are used, assuming NI6451's
@@ -80,14 +89,15 @@ The archive is uncompressed, with no object arrays. Load it with `np.load(path, 
 | --- | --- | --- | --- |
 | `t_unix` | `<f8` | `(N,)` | Wall-clock time of each poll, Unix seconds (UTC). Use it to align with NI6451 data. |
 | `pressure_psi` | `<f8` | `(N,)` | Outlet pressure |
+| `shear_stress_mpa` | `<f8` | `(N,)` | Shear stress on the fault, from `pressure_psi` and the recording's fault geometry |
 | `flow_ml_min` | `<f8` | `(N,)` | Flow reported by the pump |
 | `flow_setpoint_ml_min` | `<f8` | `(N,)` | `FI` |
 | `pressure_limit_psi` | `<f8` | `(N,)` | `UP`, as the pump reports it |
 | `running`, `fault_motor_stall`, `fault_over_pressure`, `fault_under_pressure`, `leak` | `<i8` | `(N,)` | 0/1 flags |
 | `event_t_unix`, `event_kind`, `event_message` | `<f8`, `<U…`, `<U…` | `(k,)` | Run, stop, settings changes, safety stops, faults, link loss |
-| `start_time_unix`, `max_flow_ml_min`, `max_pressure_psi`, `pressure_cap_psi`, `pressure_set_point_psi` | `<f8` | `()` | |
+| `start_time_unix`, `max_flow_ml_min`, `max_pressure_psi`, `pressure_cap_psi`, `pressure_set_point_psi`, `fault_thickness_m` | `<f8` | `()` | `fault_thickness_m` is the effective thickness (0.5 for 2D) |
 | `run`, `poll_interval_ms` | `<i8` | `()` | |
-| `experiment_serial`, `port`, `pump_identity`, `pressure_units_native`, `app_version` | `<U…` | `()` | |
+| `experiment_serial`, `port`, `pump_identity`, `pressure_units_native`, `app_version`, `fault_type` | `<U…` | `()` | `fault_type` is `1D` or `2D` |
 
 ## Building
 

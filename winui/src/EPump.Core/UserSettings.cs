@@ -18,6 +18,11 @@ public sealed class UserSettings
     public double PressureLimitPsi { get; set; } = PumpConfig.DefaultPressureLimitPsi;
     public bool LockKeypad { get; set; } = true;
 
+    /// <summary>"1D" or "2D".</summary>
+    public string FaultType { get; set; } = "1D";
+
+    public double FaultThicknessM { get; set; } = 0.10;
+
     public static UserSettings Load(string path)
     {
         UserSettings s;
@@ -35,6 +40,7 @@ public sealed class UserSettings
         if (!(s.PressureLimitPsi > 0 && s.PressureLimitPsi <= PumpConfig.PressureCapPsi))
             s.PressureLimitPsi = PumpConfig.DefaultPressureLimitPsi;
         if (!(s.FlowMlMin > 0)) s.FlowMlMin = 1.0;
+        if (s.FaultType is not ("1D" or "2D")) s.FaultType = "1D";
         return s;
     }
 

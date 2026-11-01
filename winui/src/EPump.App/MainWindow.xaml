@@ -120,8 +120,13 @@
                                         <ColumnDefinition Width="*" />
                                     </Grid.ColumnDefinitions>
                                     <NumberBox x:Name="FlowBox" Grid.Column="0" Header="Flow (mL/min)" SpinButtonPlacementMode="Compact" SmallChange="0.1" LargeChange="1" />
-                                    <NumberBox x:Name="LimitBox" Grid.Column="1" Header="Pressure limit (psi)" SpinButtonPlacementMode="Compact" SmallChange="50" LargeChange="500" />
+                                    <NumberBox x:Name="LimitBox" Grid.Column="1" Header="Limit · HI PR (psi)" SpinButtonPlacementMode="Compact" SmallChange="50" LargeChange="500" />
                                 </Grid>
+
+                                <!-- What the pump itself reports holding, to compare with its front panel. -->
+                                <Border Background="{ThemeResource LayerFillColorDefaultBrush}" CornerRadius="4" Padding="8,6">
+                                    <TextBlock x:Name="PumpPressureSettingsText" Text="Not connected." Style="{StaticResource CardCaptionStyle}" />
+                                </Border>
 
                                 <Button x:Name="ApplyButton" Content="Apply to pump" HorizontalAlignment="Stretch" IsEnabled="False" Click="OnApply"
                                         ToolTipService.ToolTip="Send the flow and the pressure limit now. Works while the pump is running." />
@@ -129,6 +134,24 @@
                                 <ToggleSwitch x:Name="KeypadLockToggle" Header="Lock the pump's front-panel keys while connected" OnContent="Locked" OffContent="Unlocked" Toggled="OnKeypadLockToggled" />
 
                                 <TextBlock x:Name="SafetyCaptionText" Style="{StaticResource CardCaptionStyle}" />
+                            </StackPanel>
+                        </Border>
+
+                        <!-- fault geometry, as in NI6451 -->
+                        <Border Style="{StaticResource CardStyle}">
+                            <StackPanel Spacing="10">
+                                <StackPanel Orientation="Horizontal" Spacing="8">
+                                    <FontIcon Glyph="&#xE7FD;" FontSize="16" Foreground="{ThemeResource AccentTextFillColorPrimaryBrush}" VerticalAlignment="Center" />
+                                    <TextBlock Text="Fault geometry" Style="{StaticResource CardHeaderStyle}" />
+                                </StackPanel>
+                                <TextBlock Text="Used to convert the pump pressure into shear stress on the fault, with the same pistons and fault size as NI6451." Style="{StaticResource CardCaptionStyle}" />
+
+                                <StackPanel Orientation="Horizontal" Spacing="0">
+                                    <RadioButton x:Name="Fault1DRadio" Content="1D" GroupName="FaultType" Checked="OnFaultTypeChanged" />
+                                    <RadioButton x:Name="Fault2DRadio" Content="2D" GroupName="FaultType" Checked="OnFaultTypeChanged" Margin="12,0,0,0" />
+                                </StackPanel>
+
+                                <ComboBox x:Name="FaultThicknessCombo" Header="Thickness" HorizontalAlignment="Stretch" SelectionChanged="OnThicknessChanged" />
                             </StackPanel>
                         </Border>
 
@@ -176,7 +199,7 @@
                     </StackPanel>
                 </ScrollViewer>
 
-                <!-- Pinned: the pump controls and the recording controls must never scroll out of reach. -->
+                <!-- Pinned: Run and STOP must never scroll out of reach. -->
                 <StackPanel Grid.Row="1" Spacing="8">
                     <Grid ColumnSpacing="8">
                         <Grid.ColumnDefinitions>
@@ -184,18 +207,18 @@
                             <ColumnDefinition Width="*" />
                         </Grid.ColumnDefinitions>
 
-                        <Button x:Name="RunPumpButton" Grid.Column="0" HorizontalAlignment="Stretch" Height="40" IsEnabled="False" Click="OnRunPump"
-                                ToolTipService.ToolTip="Send the limit, the pinned set point and the flow, confirm them, then start the pump.">
+                        <Button x:Name="RunPumpButton" Grid.Column="0" Style="{StaticResource AccentButtonStyle}" HorizontalAlignment="Stretch" Height="40" IsEnabled="False" Click="OnRunPump"
+                                ToolTipService.ToolTip="Start recording, send the limit, the pinned set point and the flow, confirm them, then start the pump. Needs an output folder.">
                             <StackPanel Orientation="Horizontal" Spacing="8">
                                 <FontIcon Glyph="&#xE768;" FontSize="14" />
-                                <TextBlock Text="Run pump" />
+                                <TextBlock Text="Run &amp; record" />
                             </StackPanel>
                         </Button>
 
                         <!-- Red, and overriding the button's own brush resources for the same reason the
                              NI6451 Monitor button does: a plain Background is replaced on pointer-over. -->
                         <Button x:Name="StopPumpButton" Grid.Column="1" HorizontalAlignment="Stretch" Height="40" IsEnabled="False" Click="OnStopPump"
-                                ToolTipService.ToolTip="Stop the pump now.">
+                                ToolTipService.ToolTip="Stop the pump now, then save the recording.">
                             <Button.Resources>
                                 <SolidColorBrush x:Key="ButtonBackground" Color="#C42B1C" />
                                 <SolidColorBrush x:Key="ButtonBackgroundPointerOver" Color="#B02718" />
@@ -211,29 +234,6 @@
                             <StackPanel Orientation="Horizontal" Spacing="8">
                                 <FontIcon Glyph="&#xE71A;" FontSize="14" />
                                 <TextBlock Text="STOP PUMP" FontWeight="SemiBold" />
-                            </StackPanel>
-                        </Button>
-                    </Grid>
-
-                    <Grid ColumnSpacing="8">
-                        <Grid.ColumnDefinitions>
-                            <ColumnDefinition Width="*" />
-                            <ColumnDefinition Width="*" />
-                        </Grid.ColumnDefinitions>
-
-                        <Button x:Name="RecordButton" Grid.Column="0" Style="{StaticResource AccentButtonStyle}" HorizontalAlignment="Stretch" Height="40" IsEnabled="False" Click="OnRecord"
-                                ToolTipService.ToolTip="Record pressure, flow and events to an .npz in the output folder. Independent of Run/Stop.">
-                            <StackPanel Orientation="Horizontal" Spacing="8">
-                                <FontIcon Glyph="&#xE7C8;" FontSize="14" />
-                                <TextBlock Text="Record" />
-                            </StackPanel>
-                        </Button>
-
-                        <Button x:Name="StopRecordButton" Grid.Column="1" HorizontalAlignment="Stretch" Height="40" IsEnabled="False" Click="OnStopRecord"
-                                ToolTipService.ToolTip="Stop recording and save the .npz. The pump keeps doing what it is doing.">
-                            <StackPanel Orientation="Horizontal" Spacing="8">
-                                <FontIcon Glyph="&#xE71A;" FontSize="14" />
-                                <TextBlock Text="Stop recording" />
                             </StackPanel>
                         </Button>
                     </Grid>
@@ -299,10 +299,10 @@
 
                     <Border Grid.Column="4" Style="{StaticResource SubtleCardStyle}">
                         <StackPanel Spacing="2">
-                            <TextBlock Text="LIMIT" Style="{StaticResource ReadoutCaptionStyle}" />
+                            <TextBlock x:Name="ShearCaptionText" Text="SHEAR STRESS" Style="{StaticResource ReadoutCaptionStyle}" />
                             <StackPanel Orientation="Horizontal">
-                                <TextBlock x:Name="LimitText" Text="—" Style="{StaticResource ReadoutValueStyle}" />
-                                <TextBlock Text="psi" Style="{StaticResource ReadoutUnitStyle}" />
+                                <TextBlock x:Name="ShearText" Text="—" Style="{StaticResource ReadoutValueStyle}" />
+                                <TextBlock Text="MPa" Style="{StaticResource ReadoutUnitStyle}" />
                             </StackPanel>
                         </StackPanel>
                     </Border>
