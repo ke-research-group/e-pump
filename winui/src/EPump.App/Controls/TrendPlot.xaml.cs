@@ -17,8 +17,8 @@ public enum TraceKind { Pressure, Flow }
 /// NI6451 application draws its channel plots, so the two windows look alike side by side.
 ///
 /// The x axis is "the last N seconds up to now", the y axis starts at zero. The pressure plot
-/// has a fixed top just above the cap and draws the active limit as a red dashed line; the
-/// flow plot scales to its set point, which is drawn dashed in the trace colour.
+/// has a fixed top just above the cap, draws the target (PRESS) dashed in the trace colour and
+/// HI PR as a red dashed line; the flow plot scales to its max flow, drawn dashed.
 /// </summary>
 public sealed partial class TrendPlot : UserControl, IDisposable
 {
@@ -55,8 +55,11 @@ public sealed partial class TrendPlot : UserControl, IDisposable
 
     public double WindowSeconds { get; set; } = PumpConfig.DefaultPlotWindowSec;
 
-    /// <summary>Pressure: the active upper limit. Flow: the set point. Null draws no reference line.</summary>
+    /// <summary>Pressure: the target (PRESS). Flow: the max flow. Null draws no line.</summary>
     public double? ReferenceValue { get; set; }
+
+    /// <summary>Pressure only: the stop limit (HI PR), drawn in red. Null draws no line.</summary>
+    public double? LimitValue { get; set; }
 
     public void Configure(TrendBuffer buffer, TraceKind kind)
     {
@@ -106,13 +109,20 @@ public sealed partial class TrendPlot : UserControl, IDisposable
         float Y(double v) => Math.Clamp(bottom - (float)(v / yMax) * (bottom - top), top - 1, bottom + 1);
 
         Color trace = _kind == TraceKind.Pressure ? p.Pressure : p.Flow;
+        if (LimitValue is double limit)
+        {
+            float y = Y(limit);
+            ds.DrawLine(left, y, right, y, p.Limit, 1.2f, _dashed);
+            ds.DrawText($"HI PR {limit:F0}", right - 76, y - 14, p.Limit, _tickFormat);
+        }
+
         if (ReferenceValue is double reference)
         {
-            Color refColour = _kind == TraceKind.Pressure ? p.Limit : trace;
             float y = Y(reference);
-            ds.DrawLine(left, y, right, y, refColour, 1.2f, _dashed);
-            string label = _kind == TraceKind.Pressure ? $"limit {reference:F0}" : $"set {reference:0.###}";
-            ds.DrawText(label, right - 70, y - 14, refColour, _tickFormat);
+            ds.DrawLine(left, y, right, y, trace, 1.2f, _dashed);
+            string label = _kind == TraceKind.Pressure ? $"target {reference:F0}" : $"max {reference:0.###}";
+            // At the left end, so it cannot collide with the HI PR label when the two lines are close.
+            ds.DrawText(label, left + 4, y - 14, trace, _tickFormat);
         }
 
         if (n < 2) return;

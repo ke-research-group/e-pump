@@ -17,7 +17,8 @@ public static class SampleColumns
         "pressure_psi",
         "shear_stress_mpa",
         "flow_ml_min",
-        "flow_setpoint_ml_min",
+        "flow_limit_ml_min",
+        "pressure_setpoint_psi",
         "pressure_limit_psi",
         "running",
         "fault_motor_stall",
@@ -38,13 +39,14 @@ public static class SampleColumns
         row[1] = s.PressurePsi;
         row[2] = geometry.ShearStressMPa(s.PressurePsi);
         row[3] = s.Flow;
-        row[4] = s.FlowSetPoint;
-        row[5] = s.PressureLimitPsi;
-        row[6] = s.Running ? 1 : 0;
-        row[7] = s.Faults.MotorStall ? 1 : 0;
-        row[8] = s.Faults.OverPressure ? 1 : 0;
-        row[9] = s.Faults.UnderPressure ? 1 : 0;
-        row[10] = s.Leak ? 1 : 0;
+        row[4] = s.FlowLimit;
+        row[5] = s.PressureSetPointPsi;
+        row[6] = s.PressureLimitPsi;
+        row[7] = s.Running ? 1 : 0;
+        row[8] = s.Faults.MotorStall ? 1 : 0;
+        row[9] = s.Faults.OverPressure ? 1 : 0;
+        row[10] = s.Faults.UnderPressure ? 1 : 0;
+        row[11] = s.Leak ? 1 : 0;
     }
 }
 
@@ -57,8 +59,11 @@ public sealed class RecordingManifest
 {
     public const string FileName = "manifest.json";
 
-    /// <summary>2 added <c>shear_stress_mpa</c> and the fault geometry.</summary>
-    public int FormatVersion { get; set; } = 2;
+    /// <summary>
+    /// 2 added <c>shear_stress_mpa</c> and the fault geometry. 3 is constant-pressure operation:
+    /// <c>pressure_setpoint_psi</c> per sample, <c>flow_limit_ml_min</c> in place of the flow set point.
+    /// </summary>
+    public int FormatVersion { get; set; } = 3;
     public string ExperimentSerial { get; set; } = "0000";
     public int Run { get; set; }
     public double StartTimeUnix { get; set; }
@@ -72,7 +77,6 @@ public sealed class RecordingManifest
     public double MaxPressurePsi { get; set; }
     public string PressureUnitsNative { get; set; } = "psi";
     public double PressureCapPsi { get; set; } = PumpConfig.PressureCapPsi;
-    public double PressureSetPointPsi { get; set; } = PumpConfig.PressureSetPointPsi;
     public int PollIntervalMs { get; set; } = PumpConfig.PollIntervalMs;
     public string AppVersion { get; set; } = string.Empty;
 
@@ -107,7 +111,7 @@ internal partial class EventJsonContext : JsonSerializerContext
 /// <summary>
 /// Streams one recording to disk while it runs: a <c>samples.f64</c> file of fixed-width rows,
 /// an <c>events.jsonl</c> log and the manifest, in a hidden folder inside the output folder.
-/// Every sample is flushed to the OS as it arrives (it is 88 bytes every half second) and the
+/// Every sample is flushed to the OS as it arrives (it is 96 bytes every half second) and the
 /// file is fsync'd every <see cref="PumpConfig.DurableFlushIntervalSec"/>, so an application
 /// crash loses nothing and a power cut at most a few seconds.
 ///
@@ -245,7 +249,6 @@ public static class RecordingFinalizer
                 npz.AddFloat64Scalar("max_flow_ml_min", manifest.MaxFlow);
                 npz.AddFloat64Scalar("max_pressure_psi", manifest.MaxPressurePsi);
                 npz.AddFloat64Scalar("pressure_cap_psi", manifest.PressureCapPsi);
-                npz.AddFloat64Scalar("pressure_set_point_psi", manifest.PressureSetPointPsi);
                 npz.AddInt64Scalar("poll_interval_ms", manifest.PollIntervalMs);
                 npz.AddString("app_version", manifest.AppVersion);
                 npz.AddString("fault_type", manifest.FaultType);

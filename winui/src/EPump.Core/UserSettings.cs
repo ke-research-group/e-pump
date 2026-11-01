@@ -14,8 +14,11 @@ public sealed class UserSettings
         Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "EPump", "settings.json");
 
     public string Port { get; set; } = string.Empty;
-    public double FlowMlMin { get; set; } = 1.0;
-    public double PressureLimitPsi { get; set; } = PumpConfig.DefaultPressureLimitPsi;
+    /// <summary>FI: the most the pump may deliver while holding the target.</summary>
+    public double FlowMlMin { get; set; } = PumpConfig.DefaultMaxFlowMlMin;
+
+    /// <summary>PS: the target pressure. Never above the cap, whatever the file says.</summary>
+    public double TargetPressurePsi { get; set; } = PumpConfig.DefaultTargetPressurePsi;
     public bool LockKeypad { get; set; } = true;
 
     /// <summary>"1D" or "2D".</summary>
@@ -37,9 +40,9 @@ public sealed class UserSettings
             s = new UserSettings();   // a corrupt file must not stop the app from starting
         }
 
-        if (!(s.PressureLimitPsi > 0 && s.PressureLimitPsi <= PumpConfig.PressureCapPsi))
-            s.PressureLimitPsi = PumpConfig.DefaultPressureLimitPsi;
-        if (!(s.FlowMlMin > 0)) s.FlowMlMin = 1.0;
+        if (!(s.TargetPressurePsi > 0 && s.TargetPressurePsi <= PumpConfig.PressureCapPsi))
+            s.TargetPressurePsi = PumpConfig.DefaultTargetPressurePsi;
+        if (!(s.FlowMlMin > 0)) s.FlowMlMin = PumpConfig.DefaultMaxFlowMlMin;
         if (s.FaultType is not ("1D" or "2D")) s.FaultType = "1D";
         return s;
     }

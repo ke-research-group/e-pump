@@ -42,7 +42,7 @@ public sealed class PumpRecorder
         var recorder = new PumpRecorder(session, new RecordingSpool(saveDir, manifest));
         recorder.Spool.AppendEvent(new PumpEvent(manifest.StartTimeUnix, EventKinds.Connected, session.ConnectionSummary));
         recorder.Spool.AppendEvent(new PumpEvent(manifest.StartTimeUnix, EventKinds.RecordStart,
-            $"Recording T{manifest.ExperimentSerial} run {run}; limit {session.PressureLimitPsi:F0} psi, flow set point {session.FlowSetPoint} mL/min"));
+            $"Recording T{manifest.ExperimentSerial} run {run}; PRESS {session.PressureSetPointPsi:F0} psi, max flow {session.FlowLimit} mL/min, HI PR {PumpConfig.UpperLimitPsi:F0} psi, {geometry.Type.ToLabel()} {geometry.EffectiveThicknessM * 100:0} cm"));
 
         session.SampleReceived += recorder.Spool.Append;
         session.EventLogged += recorder.Spool.AppendEvent;

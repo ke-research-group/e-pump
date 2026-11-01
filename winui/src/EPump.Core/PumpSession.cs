@@ -9,12 +9,11 @@ public static class EventKinds
     public const string Connected = "connected";
     public const string PumpRun = "pump_run";
     public const string PumpStop = "pump_stop";
-    public const string FlowSet = "flow_set";
-    public const string LimitSet = "limit_set";
+    public const string TargetSet = "target_set";
+    public const string MaxFlowSet = "max_flow_set";
     public const string LimitRestored = "limit_restored";
     public const string FaultsCleared = "faults_cleared";
     public const string SafetyOverPressure = "safety_stop_overpressure";
-    public const string SafetyFlowDeviation = "safety_stop_flow_deviation";
     public const string PumpFault = "pump_fault";
     public const string LinkLost = "link_lost";
     public const string LinkRestored = "link_restored";
@@ -31,17 +30,19 @@ public static class UnixTime
 /// <summary>
 /// A connected pump: the poll loop, the safety rules, and every command the UI can issue.
 ///
-/// Connecting immediately puts the pump into the state this application relies on -- the
-/// pressure set point pinned at <see cref="PumpConfig.PressureSetPointPsi"/> and the upper
-/// limit at the operator's value -- and polling starts at once and runs for as long as the
-/// session lives. Polling is not optional: the software safety checks only exist while it runs.
+/// The pump runs in its constant-pressure mode. The operator sets the target pressure (PS,
+/// front panel PRESS) and the maximum flow (FI); the pump varies its flow, up to that maximum,
+/// to hold the target. The upper pressure limit (UP, front panel HI PR) is not the operator's:
+/// it is pinned at <see cref="PumpConfig.UpperLimitPsi"/> on connect, checked on every poll, and
+/// put back if anyone raises it from the keypad.
 ///
-/// Events are raised on the poll loop's thread; UI subscribers must marshal.
+/// Polling starts on connect and runs for as long as the session lives; the software safety
+/// check only exists while it runs. Events are raised on the poll loop's thread.
 /// </summary>
 public sealed class PumpSession : IAsyncDisposable
 {
     private readonly PumpClient _client;
-    private readonly SafetyMonitor _safety;
+    private readonly SafetyMonitor _safety = new();
     private readonly object _safetyGate = new();
     private readonly CancellationTokenSource _cts = new();
     private Task _pollLoop = Task.CompletedTask;
@@ -51,17 +52,11 @@ public sealed class PumpSession : IAsyncDisposable
     private bool _leak;
     private bool _lastRunning;
 
-    private PumpSession(PumpClient client, double pressureLimitPsi)
-    {
-        _client = client;
-        _safety = new SafetyMonitor(pressureLimitPsi);
-    }
+    private PumpSession(PumpClient client) => _client = client;
 
     public PumpInfo Info => _client.Info!;
 
     public string PortName => _client.PortName;
-
-    public double PressureLimitPsi { get { lock (_safetyGate) return _safety.PressureLimitPsi; } }
 
     /// <summary>The most recent successful poll, or null before the first one.</summary>
     public PumpSample? LatestSample { get; private set; }
@@ -72,11 +67,11 @@ public sealed class PumpSession : IAsyncDisposable
     /// <summary>One line describing the pump and the link, for the event log.</summary>
     public string ConnectionSummary { get; private set; } = string.Empty;
 
-    /// <summary>The constant-pressure set point (front panel PRESS) as last read back from the pump, psi.</summary>
+    /// <summary>PS (front panel PRESS), as last read back from the pump, psi.</summary>
     public double PressureSetPointPsi { get; private set; }
 
-    /// <summary>The flow the pump last accepted for FI, mL/min.</summary>
-    public double FlowSetPoint { get; private set; }
+    /// <summary>FI, the maximum flow, as last read back from the pump, mL/min.</summary>
+    public double FlowLimit { get; private set; }
 
     public event Action<PumpSample>? SampleReceived;
     public event Action<SafetyVerdict>? SafetyTripped;
@@ -84,27 +79,29 @@ public sealed class PumpSession : IAsyncDisposable
     public event Action<bool, string>? LinkStateChanged;
 
     /// <summary>
-    /// Identify the pump, pin its pressure set point and limit, and start polling. Throws, and
-    /// leaves nothing open, if the pump does not answer or will not take the settings.
+    /// Identify the pump, pin HI PR at the cap, read its current target and maximum flow, and
+    /// start polling. Throws, and leaves nothing open, if the pump does not answer or will not
+    /// take the limit. The target pressure itself is only written by Run and Apply.
     /// </summary>
-    public static async Task<PumpSession> ConnectAsync(IPumpTransport transport, double pressureLimitPsi, CancellationToken ct = default)
+    public static async Task<PumpSession> ConnectAsync(IPumpTransport transport, CancellationToken ct = default)
     {
-        SafetyMonitor.ValidateLimit(pressureLimitPsi);
         var client = new PumpClient(transport);
-        var session = new PumpSession(client, pressureLimitPsi);
+        var session = new PumpSession(client);
         try
         {
             PumpInfo info = await client.IdentifyAsync(ct).ConfigureAwait(false);
-            await session.ApplyPressureSettingsAsync(pressureLimitPsi, ct).ConfigureAwait(false);
+            await session.PinUpperLimitAsync(ct).ConfigureAwait(false);
 
+            session.PressureSetPointPsi = await client.ReadPressureSetPointAsync(ct).ConfigureAwait(false);
             PumpStatus status = await client.ReadStatusAsync(ct).ConfigureAwait(false);
-            session.FlowSetPoint = status.FlowSetPoint;
+            session.FlowLimit = status.FlowSetPoint;
             session._lastRunning = status.Running;
 
             // Nobody can have subscribed to EventLogged yet, so the summary is kept for the
             // caller to log rather than raised here.
             session.ConnectionSummary =
-                $"{info.Identity} on {client.PortName}: max {info.MaxFlow} mL/min, {info.MaxPressurePsi:F0} psi, units {info.Units}"
+                $"{info.Identity} on {client.PortName}: max {info.MaxFlow} mL/min, {info.MaxPressurePsi:F0} psi, units {info.Units}; "
+                + $"HI PR pinned at {PumpConfig.UpperLimitPsi:F0} psi, PRESS {session.PressureSetPointPsi:F0} psi"
                 + (status.Running ? " (already running)" : string.Empty);
 
             session._pollLoop = Task.Run(() => session.PollLoopAsync(session._cts.Token));
@@ -120,31 +117,25 @@ public sealed class PumpSession : IAsyncDisposable
     // ---------- commands ----------
 
     /// <summary>
-    /// Set the limit, the pinned set point and the flow, read every one of them back, and only
-    /// then send Run. A pump that will not confirm its settings is not started.
+    /// Write HI PR, the target pressure and the maximum flow, read every one of them back, and
+    /// only then send Run. A pump that will not confirm its settings is not started.
     /// </summary>
-    public async Task StartPumpAsync(double flow, CancellationToken ct = default)
+    public async Task StartPumpAsync(double targetPsi, double maxFlow, CancellationToken ct = default)
     {
-        ValidateFlow(flow);
+        SafetyMonitor.ValidateTarget(targetPsi);
+        ValidateFlow(maxFlow);
 
         PumpFaults faults = await _client.ReadFaultsAsync(ct).ConfigureAwait(false);
         if (faults.Any)
             throw new InvalidOperationException(SafetyMonitor.DescribeFaults(faults) + " Clear the fault before running.");
 
-        double limit = PressureLimitPsi;
-        await ApplyPressureSettingsAsync(limit, ct).ConfigureAwait(false);
+        await PinUpperLimitAsync(ct).ConfigureAwait(false);
+        await ApplyTargetAsync(targetPsi, ct).ConfigureAwait(false);
+        await ApplyMaxFlowAsync(maxFlow, ct).ConfigureAwait(false);
 
-        double accepted = await _client.SetFlowAsync(flow, ct).ConfigureAwait(false);
-        PumpStatus status = await _client.ReadStatusAsync(ct).ConfigureAwait(false);
-        double resolution = Math.Pow(10, -Info.FlowDecimals);
-        if (Math.Abs(status.FlowSetPoint - flow) > resolution / 2 + 1e-9)
-            throw new InvalidOperationException(
-                $"The pump reports a flow set point of {status.FlowSetPoint} mL/min after being sent {flow} mL/min (it accepted {accepted}). Not starting.");
-        FlowSetPoint = status.FlowSetPoint;
-
-        lock (_safetyGate) _safety.ArmGrace(UnixTime.Now());
         await _client.RunAsync(ct).ConfigureAwait(false);
-        Log(EventKinds.PumpRun, $"Run at {flow} mL/min, limit {limit:F0} psi, set point {PumpConfig.PressureSetPointPsi:F0} psi");
+        Log(EventKinds.PumpRun,
+            $"Run: target {PressureSetPointPsi:F0} psi, max flow {FlowLimit} mL/min, HI PR {PumpConfig.UpperLimitPsi:F0} psi");
     }
 
     /// <summary>Send Stop. Deliberately not cancellable: a stop that is abandoned half-way is worse than one that is slow.</summary>
@@ -154,22 +145,20 @@ public sealed class PumpSession : IAsyncDisposable
         Log(EventKinds.PumpStop, reason);
     }
 
-    /// <summary>Change the flow, running or not. The flow check is re-armed so the ramp is not mistaken for throttling.</summary>
-    public async Task SetFlowAsync(double flow, CancellationToken ct = default)
+    /// <summary>Change the target pressure, running or not.</summary>
+    public async Task SetTargetPressureAsync(double targetPsi, CancellationToken ct = default)
     {
-        ValidateFlow(flow);
-        lock (_safetyGate) _safety.ArmGrace(UnixTime.Now());
-        await _client.SetFlowAsync(flow, ct).ConfigureAwait(false);
-        PumpStatus status = await _client.ReadStatusAsync(ct).ConfigureAwait(false);
-        FlowSetPoint = status.FlowSetPoint;
-        Log(EventKinds.FlowSet, $"Flow set to {status.FlowSetPoint} mL/min");
+        SafetyMonitor.ValidateTarget(targetPsi);
+        await ApplyTargetAsync(targetPsi, ct).ConfigureAwait(false);
+        Log(EventKinds.TargetSet, $"Target pressure set to {PressureSetPointPsi:F0} psi");
     }
 
-    public async Task SetPressureLimitAsync(double psi, CancellationToken ct = default)
+    /// <summary>Change the maximum flow, running or not.</summary>
+    public async Task SetMaxFlowAsync(double maxFlow, CancellationToken ct = default)
     {
-        SafetyMonitor.ValidateLimit(psi);
-        await ApplyPressureSettingsAsync(psi, ct).ConfigureAwait(false);
-        Log(EventKinds.LimitSet, $"Upper pressure limit set to {psi:F0} psi");
+        ValidateFlow(maxFlow);
+        await ApplyMaxFlowAsync(maxFlow, ct).ConfigureAwait(false);
+        Log(EventKinds.MaxFlowSet, $"Max flow set to {FlowLimit} mL/min");
     }
 
     public async Task ClearFaultsAsync(CancellationToken ct = default)
@@ -183,31 +172,39 @@ public sealed class PumpSession : IAsyncDisposable
     private void ValidateFlow(double flow)
     {
         if (!double.IsFinite(flow) || flow <= 0 || flow > Info.MaxFlow)
-            throw new ArgumentOutOfRangeException(nameof(flow), flow, $"The flow must be above 0 and at most {Info.MaxFlow} mL/min.");
+            throw new ArgumentOutOfRangeException(nameof(flow), flow, $"The maximum flow must be above 0 and at most {Info.MaxFlow} mL/min.");
     }
 
-    /// <summary>
-    /// Write UP and PS and read both back. The limit is verified to be no higher than asked
-    /// (the protocol rounds down) and the set point to be the pinned value -- if either check
-    /// fails, the safety assumptions of the whole application do not hold, so this throws.
-    /// </summary>
-    private async Task ApplyPressureSettingsAsync(double limitPsi, CancellationToken ct)
+    /// <summary>psi round-trips exactly; bar and MPa lose up to one count of the pump's resolution.</summary>
+    private double PressureTolerance => Info.Units == PressureUnit.Psi ? 1 : 16;
+
+    /// <summary>Write UP and read it back. If the pump will not hold the cap, the protection this application relies on is missing, so this throws.</summary>
+    private async Task PinUpperLimitAsync(CancellationToken ct)
     {
-        await _client.SetUpperLimitAsync(limitPsi, ct).ConfigureAwait(false);
-        await _client.SetPressureSetPointAsync(PumpConfig.PressureSetPointPsi, ct).ConfigureAwait(false);
-
+        await _client.SetUpperLimitAsync(PumpConfig.UpperLimitPsi, ct).ConfigureAwait(false);
         double up = await _client.ReadUpperLimitAsync(ct).ConfigureAwait(false);
+        if (up > PumpConfig.UpperLimitPsi + 0.5 || up < PumpConfig.UpperLimitPsi - PressureTolerance)
+            throw new InvalidOperationException($"The pump holds HI PR at {up:F0} psi after being sent {PumpConfig.UpperLimitPsi:F0} psi.");
+    }
+
+    private async Task ApplyTargetAsync(double targetPsi, CancellationToken ct)
+    {
+        await _client.SetPressureSetPointAsync(targetPsi, ct).ConfigureAwait(false);
         double ps = await _client.ReadPressureSetPointAsync(ct).ConfigureAwait(false);
-
-        // psi round-trips exactly; bar and MPa lose up to one count of the pump's resolution.
-        double tolerance = Info.Units == PressureUnit.Psi ? 1 : 16;
-        if (up > limitPsi + 0.5 || up < limitPsi - tolerance)
-            throw new InvalidOperationException($"The pump holds an upper limit of {up:F0} psi after being sent {limitPsi:F0} psi.");
-        if (ps > PumpConfig.PressureCapPsi + 0.5 || ps < PumpConfig.PressureSetPointPsi - tolerance)
-            throw new InvalidOperationException($"The pump holds a pressure set point of {ps:F0} psi after being sent {PumpConfig.PressureSetPointPsi:F0} psi.");
-
+        if (ps > targetPsi + 0.5 || ps < targetPsi - PressureTolerance)
+            throw new InvalidOperationException($"The pump holds a target (PRESS) of {ps:F0} psi after being sent {targetPsi:F0} psi.");
         PressureSetPointPsi = ps;
-        lock (_safetyGate) _safety.PressureLimitPsi = limitPsi;
+    }
+
+    private async Task ApplyMaxFlowAsync(double maxFlow, CancellationToken ct)
+    {
+        double accepted = await _client.SetFlowAsync(maxFlow, ct).ConfigureAwait(false);
+        PumpStatus status = await _client.ReadStatusAsync(ct).ConfigureAwait(false);
+        double resolution = Math.Pow(10, -Info.FlowDecimals);
+        if (Math.Abs(status.FlowSetPoint - maxFlow) > resolution / 2 + 1e-9)
+            throw new InvalidOperationException(
+                $"The pump reports a maximum flow of {status.FlowSetPoint} mL/min after being sent {maxFlow} mL/min (it accepted {accepted}).");
+        FlowLimit = status.FlowSetPoint;
     }
 
     // ---------- polling ----------
@@ -237,11 +234,18 @@ public sealed class PumpSession : IAsyncDisposable
             double t = UnixTime.Now();
             PumpStatus status = await _client.ReadStatusAsync(ct).ConfigureAwait(false);
             PumpFaults faults = await _client.ReadFaultsAsync(ct).ConfigureAwait(false);
-            if (_cycle++ % PumpConfig.LeakPollEvery == 0)
-                _leak = await _client.ReadLeakAsync(ct).ConfigureAwait(false) ?? false;
 
-            sample = new PumpSample(t, pressure, flow, status.FlowSetPoint, status.UpperLimit, status.Running, faults, _leak);
-            FlowSetPoint = status.FlowSetPoint;
+            // The slow-changing values are read every few cycles to keep the cycle short.
+            // PS is among them so a target changed on the keypad still shows up.
+            if (_cycle++ % PumpConfig.LeakPollEvery == 0)
+            {
+                _leak = await _client.ReadLeakAsync(ct).ConfigureAwait(false) ?? false;
+                PressureSetPointPsi = await _client.ReadPressureSetPointAsync(ct).ConfigureAwait(false);
+            }
+
+            FlowLimit = status.FlowSetPoint;
+            sample = new PumpSample(t, pressure, flow, status.FlowSetPoint, PressureSetPointPsi, status.UpperLimit,
+                                    status.Running, faults, _leak);
         }
         catch (Exception e) when (e is TimeoutException or PumpProtocolException or IOException
                                       or InvalidOperationException or UnauthorizedAccessException)
@@ -280,14 +284,9 @@ public sealed class PumpSession : IAsyncDisposable
 
     private async Task HandleTripAsync(SafetyVerdict verdict)
     {
-        string kind = verdict.Reason switch
-        {
-            TripReason.OverPressure => EventKinds.SafetyOverPressure,
-            TripReason.FlowDeviation => EventKinds.SafetyFlowDeviation,
-            _ => EventKinds.PumpFault,
-        };
+        string kind = verdict.Reason == TripReason.OverPressure ? EventKinds.SafetyOverPressure : EventKinds.PumpFault;
 
-        if (verdict.Reason != TripReason.PumpFault)
+        if (verdict.Reason == TripReason.OverPressure)
         {
             try
             {
@@ -304,17 +303,16 @@ public sealed class PumpSession : IAsyncDisposable
         SafetyTripped?.Invoke(verdict);
     }
 
-    /// <summary>Someone raised the limit from the front panel: put it back.</summary>
+    /// <summary>HI PR raised from the front panel: put it back. Lowering it is left alone, since that is only safer.</summary>
     private async Task EnforceLimitAsync(PumpSample sample, CancellationToken ct)
     {
-        double limit = PressureLimitPsi;
-        if (sample.PressureLimitPsi <= limit + 0.5) return;
+        if (sample.PressureLimitPsi <= PumpConfig.UpperLimitPsi + 0.5) return;
 
         try
         {
-            await _client.SetUpperLimitAsync(limit, ct).ConfigureAwait(false);
+            await _client.SetUpperLimitAsync(PumpConfig.UpperLimitPsi, ct).ConfigureAwait(false);
             Log(EventKinds.LimitRestored,
-                $"The pump's upper limit was {sample.PressureLimitPsi:F0} psi (changed on the keypad?); restored to {limit:F0} psi");
+                $"HI PR was {sample.PressureLimitPsi:F0} psi (changed on the keypad?); restored to {PumpConfig.UpperLimitPsi:F0} psi");
         }
         catch (Exception e) when (e is TimeoutException or PumpProtocolException or IOException or InvalidOperationException)
         {

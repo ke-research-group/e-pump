@@ -1,8 +1,8 @@
 # e-pump — ReaXus CP Class pump control
 
 A C# / WinUI 3 application that runs a **Teledyne ISCO (Teledyne LABS) ReaXus CP Class**
-dual-piston pump at **constant flow** with a hard **2800 psi** ceiling, and records pressure and
-flow to NumPy `.npz` files. It is meant to run beside the
+dual-piston pump at **constant pressure** with a hard **2800 psi** ceiling, and records pressure,
+flow and shear stress to NumPy `.npz` files. It is meant to run beside the
 [NI6451 acquisition application](https://github.com/ke-research-group/NI6451) and follows its
 layout, build setup and file naming.
 
@@ -11,16 +11,16 @@ The pump in the lab is the 12 mL/min model: 0.001–12.000 mL/min in 0.001 steps
 
 ## Safety model
 
-The CP Class has no constant-flow mode. It always adjusts its flow, up to the flow set point
-(`FI`), to reach a pressure set point (`PS`). This application uses it for constant flow like this:
+The CP Class varies its flow, up to a maximum (`FI`, front panel **FLOW**), to hold a target
+pressure (`PS`, front panel **PRESS** with its LED solid). The operator sets the target and the
+maximum flow. The stop limit (`UP`, front panel **HI PR**) is not theirs to set.
 
 | Layer | What it does |
 | --- | --- |
-| `PS` pinned at 2800 psi (front panel **PRESS**, LED solid) | The pump's constant-pressure target is never below the cap, so it delivers exactly `FI` and does not start throttling before the limit. Never changed by the operator. |
-| Pump upper limit `UP` (front panel **HI PR**) | The operator's limit (≤ 2800, default 2700): the pressure at which the pump stops itself and faults. This is the value the window's "Limit · HI PR" changes. Read back after every write. |
-| Software over-pressure stop | Every poll (2 Hz): if the pressure is at or above the limit while running, `ST` is sent at once. |
-| Software flow-deviation stop | If the reported flow stays more than 5 % below the set point for 3 polls, the pump is stopped: it was throttling, so the flow was no longer constant. Suspended for 10 s after Run or a flow change. |
-| Keypad guard | If the pump's `UP` is raised from the front panel, it is put back on the next poll. The keypad can also be locked (`KD`) while connected. |
+| `UP` pinned at 2800 psi (**HI PR**) | The pump stops itself and faults above it. Written on connect and before every run, and read back each time. The window has no control for it. |
+| Target `PS` (**PRESS**) | The operator's target, at most 2800 psi. Written and read back before every run, and polled so that a change on the keypad is seen. A target close to 2800 leaves no room for overshoot. |
+| Software over-pressure stop | On every poll (2 Hz), a running pump at or above 2800 psi is sent `ST` at once. |
+| Keypad guard | If HI PR is raised from the front panel, it is put back on the next poll. The keypad can also be locked (`KD`) while connected. |
 | Run gating | Run is only sent after `UP`, `PS` and `FI` have been written **and read back**. A pump with an active fault is not started. |
 | Window and link | The window will not close or disconnect while the pump runs. Losing contact for 3 poll cycles raises an alarm: the pump keeps running, and the software checks cannot act until it answers again. |
 
@@ -48,8 +48,9 @@ port, or RS-232 through an adapter.
    units, current pressure, flow, limits, set point, faults and leak sensor.
 4. Start `EPump.exe`, pick the port, and press **Connect**.
 
-Connecting sets the pump's `PS` to 2800 psi and its `UP` to the limit in the window. The
-**Simulator** port runs everything against a built-in simulated pump, with no hardware.
+Connecting sets the pump's HI PR (`UP`) to 2800 psi. It does not change the target pressure;
+Run and **Apply to pump** do that. The **Simulator** port runs everything against a built-in
+simulated pump, with no hardware.
 
 ## Using it
 
@@ -62,12 +63,13 @@ Connecting sets the pump's `PS` to 2800 psi and its `UP` to the limit in the win
     another command is in flight.
   - If the pump stops by itself, through a safety stop, a fault or its own RUN/STOP key, the
     recording runs on for 5 s to capture the pressure decay, then saves.
-  - **Apply to pump** changes the flow or the limit, including while running.
+  - **Apply to pump** changes the target pressure or the max flow, including while running.
 - **Fault geometry**: choose 1D (5 cm or 10 cm) or 2D (50 cm, fixed), as in NI6451. The
   **SHEAR STRESS** tile converts the pump pressure into shear stress on the fault with NI6451's
   formula: pressure × shear-piston area (12.67 × 10⁻³ m²; ×3 for 2D) ÷ (thickness × 0.5 m).
-- The constant-flow card shows the HI PR and PRESS values the pump reports, so they can be
-  compared with its front panel.
+- The constant-pressure card shows the PRESS, HI PR and max flow values the pump reports, so
+  they can be compared with its front panel. The pressure plot draws the target as a dashed
+  line and HI PR as a red dashed line.
 - **Output naming** is read from NI6451's `%LOCALAPPDATA%\Ni6451\naming.json` and never
   written to it:
   - If NI6451 has recorded a run today, the same serial and run are used, assuming NI6451's
@@ -91,11 +93,12 @@ The archive is uncompressed, with no object arrays. Load it with `np.load(path, 
 | `pressure_psi` | `<f8` | `(N,)` | Outlet pressure |
 | `shear_stress_mpa` | `<f8` | `(N,)` | Shear stress on the fault, from `pressure_psi` and the recording's fault geometry |
 | `flow_ml_min` | `<f8` | `(N,)` | Flow reported by the pump |
-| `flow_setpoint_ml_min` | `<f8` | `(N,)` | `FI` |
-| `pressure_limit_psi` | `<f8` | `(N,)` | `UP`, as the pump reports it |
+| `flow_limit_ml_min` | `<f8` | `(N,)` | `FI`, the max flow |
+| `pressure_setpoint_psi` | `<f8` | `(N,)` | `PS`, the target (PRESS), as the pump reports it |
+| `pressure_limit_psi` | `<f8` | `(N,)` | `UP` (HI PR), as the pump reports it |
 | `running`, `fault_motor_stall`, `fault_over_pressure`, `fault_under_pressure`, `leak` | `<i8` | `(N,)` | 0/1 flags |
 | `event_t_unix`, `event_kind`, `event_message` | `<f8`, `<U…`, `<U…` | `(k,)` | Run, stop, settings changes, safety stops, faults, link loss |
-| `start_time_unix`, `max_flow_ml_min`, `max_pressure_psi`, `pressure_cap_psi`, `pressure_set_point_psi`, `fault_thickness_m` | `<f8` | `()` | `fault_thickness_m` is the effective thickness (0.5 for 2D) |
+| `start_time_unix`, `max_flow_ml_min`, `max_pressure_psi`, `pressure_cap_psi`, `fault_thickness_m` | `<f8` | `()` | `fault_thickness_m` is the effective thickness (0.5 for 2D) |
 | `run`, `poll_interval_ms` | `<i8` | `()` | |
 | `experiment_serial`, `port`, `pump_identity`, `pressure_units_native`, `app_version`, `fault_type` | `<U…` | `()` | `fault_type` is `1D` or `2D` |
 
@@ -146,9 +149,7 @@ cd winui && dotnet run --project src/EPump.Tools/EPump.Tools.csproj -- selftest
 
 ## Not yet verified on the real pump
 
-- That the micro-USB driver presents a virtual COM port.
-- Whether the pump's own CP controller reduces flow somewhat before the pressure reaches `PS`.
-  If it does, the flow-deviation stop triggers before the limit does. That still stops the
-  pump, but the 5 % tolerance may need tuning.
+- How far the pump's CP controller overshoots its target, which decides how close to 2800 psi
+  a target can safely be. The PID gains (`PG`, `IG`, `DG`) are not changed by this application.
 - The format of `CC` pressure replies when the pump is set to bar or MPa. Readings are parsed
   as decimal numbers in those units and converted. Keep the pump on psi to be safe.

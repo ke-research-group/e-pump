@@ -73,9 +73,9 @@ public sealed partial class MainWindow : Window
         };
         FlowBox.Value = _settings.FlowMlMin;
 
-        LimitBox.Minimum = 1;
-        LimitBox.Maximum = PumpConfig.PressureCapPsi;
-        LimitBox.Value = _settings.PressureLimitPsi;
+        TargetBox.Minimum = 1;
+        TargetBox.Maximum = PumpConfig.PressureCapPsi;
+        TargetBox.Value = _settings.TargetPressurePsi;
         KeypadLockToggle.IsOn = _settings.LockKeypad;
 
         // Checking a radio button populates the thickness list, which selects the saved thickness.
@@ -83,10 +83,10 @@ public sealed partial class MainWindow : Window
         else Fault1DRadio.IsChecked = true;
 
         SafetyCaptionText.Text =
-            $"The pump's constant-pressure set point is pinned at {PumpConfig.PressureSetPointPsi:F0} psi, the cap, so it "
-            + $"delivers exactly this flow. The limit cannot exceed {PumpConfig.PressureCapPsi:F0} psi. Reaching it stops the "
-            + $"pump, and so does the flow dropping more than {PumpConfig.FlowDeviationTolerance:P0} below the set point "
-            + $"({PumpConfig.FlowCheckGraceSeconds:F0} s after a start or a flow change).";
+            $"The pump varies its flow, up to the max flow, to hold the target pressure (front panel PRESS). "
+            + $"HI PR is pinned at {PumpConfig.UpperLimitPsi:F0} psi: the pump stops itself above it, and this application "
+            + $"stops it at {PumpConfig.PressureCapPsi:F0} psi too. A target close to {PumpConfig.PressureCapPsi:F0} psi leaves "
+            + "no room for overshoot.";
 
         foreach (int s in PumpConfig.PlotWindowsSec) WindowCombo.Items.Add(s >= 60 ? $"{s / 60} min" : $"{s} s");
         WindowCombo.SelectedIndex = Array.IndexOf(PumpConfig.PlotWindowsSec, PumpConfig.DefaultPlotWindowSec);
@@ -147,8 +147,6 @@ public sealed partial class MainWindow : Window
             return;
         }
 
-        if (!TryReadLimit(out double limit)) return;
-
         _busy = true;
         UpdateControls();
         SetStatus($"Connecting to {port}…", StatusKind.Busy);
@@ -158,7 +156,7 @@ public sealed partial class MainWindow : Window
                 ? new SimulatedPump()
                 : await Task.Run(() => (IPumpTransport)new SerialPumpTransport(port));
 
-            PumpSession session = await PumpSession.ConnectAsync(transport, limit);
+            PumpSession session = await PumpSession.ConnectAsync(transport);
             session.SampleReceived += OnSample;
             session.SafetyTripped += OnSafetyTripped;
             session.LinkStateChanged += OnLinkStateChanged;
@@ -171,7 +169,6 @@ public sealed partial class MainWindow : Window
             PumpInfoText.Text =
                 $"{info.Identity} · max {info.MaxFlow.ToString("F" + info.FlowDecimals, CultureInfo.InvariantCulture)} mL/min, "
                 + $"{info.MaxPressurePsi:F0} psi · reports in {info.Units}";
-            if (session.FlowSetPoint > 0 && session.LatestSample is null) FlowBox.Value = session.FlowSetPoint;
 
             if (KeypadLockToggle.IsOn) await TrySetKeypadLockAsync(true);
 
@@ -180,7 +177,7 @@ public sealed partial class MainWindow : Window
             _settings.Port = port;
             _settings.Save(UserSettings.DefaultPath);
             ClearAlert();
-            SetStatus($"Connected to {port} · limit {limit:F0} psi · set point pinned at {PumpConfig.PressureSetPointPsi:F0} psi", StatusKind.Connected);
+            SetStatus($"Connected to {port} · HI PR pinned at {PumpConfig.UpperLimitPsi:F0} psi", StatusKind.Connected);
         }
         catch (Exception ex) when (IsPumpError(ex) || ex is ArgumentException)
         {
@@ -256,7 +253,7 @@ public sealed partial class MainWindow : Window
     /// </summary>
     private async void OnRunPump(object sender, RoutedEventArgs e)
     {
-        if (_session is null || !TryReadFlow(out double flow) || !TryReadLimit(out double limit)) return;
+        if (_session is null || !TryReadTarget(out double target) || !TryReadFlow(out double flow)) return;
         if (_saveDir is null)
         {
             ShowAlert(InfoBarSeverity.Warning, "No output folder", "Every run is recorded: choose an output folder first.");
@@ -269,8 +266,6 @@ public sealed partial class MainWindow : Window
         PumpRecorder? recorder = null;
         try
         {
-            if (Math.Abs(limit - _session.PressureLimitPsi) > 0.5) await _session.SetPressureLimitAsync(limit);
-
             recorder = PumpRecorder.Start(_session, _saveDir, CurrentSerialPadded, CurrentRn, _appVersion, CurrentGeometry);
             _recorder = recorder;
             _recordStartedUtc = DateTime.UtcNow;
@@ -278,11 +273,11 @@ public sealed partial class MainWindow : Window
             _tailUntilUtc = null;
             StatsPanel.Visibility = Visibility.Visible;
 
-            await _session.StartPumpAsync(flow);
+            await _session.StartPumpAsync(target, flow);
 
-            RememberFlowAndLimit(flow, limit);
+            RememberTargetAndFlow(target, flow);
             ClearAlert();
-            SetStatus($"Running at {flow} mL/min · limit {limit:F0} psi · recording {recorder.Spool.Manifest.OutputFileName}",
+            SetStatus($"Running · target {target:F0} psi · max flow {flow} mL/min · recording {recorder.Spool.Manifest.OutputFileName}",
                 StatusKind.Recording);
         }
         catch (Exception ex) when (IsPumpError(ex) || ex is ArgumentException)
@@ -336,17 +331,18 @@ public sealed partial class MainWindow : Window
 
     private async void OnApply(object sender, RoutedEventArgs e)
     {
-        if (_session is null || !TryReadFlow(out double flow) || !TryReadLimit(out double limit)) return;
+        if (_session is null || !TryReadTarget(out double target) || !TryReadFlow(out double flow)) return;
 
         _busy = true;
         UpdateControls();
         try
         {
-            if (Math.Abs(limit - _session.PressureLimitPsi) > 0.5) await _session.SetPressureLimitAsync(limit);
-            if (Math.Abs(flow - _session.FlowSetPoint) > 1e-9) await _session.SetFlowAsync(flow);
-            RememberFlowAndLimit(flow, limit);
+            if (Math.Abs(target - _session.PressureSetPointPsi) > 0.5) await _session.SetTargetPressureAsync(target);
+            if (Math.Abs(flow - _session.FlowLimit) > 1e-9) await _session.SetMaxFlowAsync(flow);
+            RememberTargetAndFlow(target, flow);
             ClearAlert();
-            SetStatus($"Applied: {flow} mL/min · limit {limit:F0} psi", _session.LatestSample is { Running: true } ? StatusKind.Running : StatusKind.Connected);
+            SetStatus($"Applied: target {target:F0} psi · max flow {flow} mL/min",
+                _session.LatestSample is { Running: true } ? StatusKind.Running : StatusKind.Connected);
         }
         catch (Exception ex) when (IsPumpError(ex) || ex is ArgumentException)
         {
@@ -379,28 +375,28 @@ public sealed partial class MainWindow : Window
         double max = _session?.Info.MaxFlow ?? FlowBox.Maximum;
         if (double.IsNaN(flow) || flow <= 0 || flow > max)
         {
-            ShowAlert(InfoBarSeverity.Warning, "Check the flow", $"Enter a flow above 0 and at most {max} mL/min.");
+            ShowAlert(InfoBarSeverity.Warning, "Check the max flow", $"Enter a max flow above 0 and at most {max} mL/min.");
             return false;
         }
         return true;
     }
 
-    private bool TryReadLimit(out double limit)
+    private bool TryReadTarget(out double target)
     {
-        limit = LimitBox.Value;
-        if (double.IsNaN(limit) || limit <= 0 || limit > PumpConfig.PressureCapPsi)
+        target = TargetBox.Value;
+        if (double.IsNaN(target) || target <= 0 || target > PumpConfig.PressureCapPsi)
         {
-            ShowAlert(InfoBarSeverity.Warning, "Check the pressure limit",
-                $"Enter a limit above 0 and at most {PumpConfig.PressureCapPsi:F0} psi.");
+            ShowAlert(InfoBarSeverity.Warning, "Check the target pressure",
+                $"Enter a target above 0 and at most {PumpConfig.PressureCapPsi:F0} psi.");
             return false;
         }
         return true;
     }
 
-    private void RememberFlowAndLimit(double flow, double limit)
+    private void RememberTargetAndFlow(double target, double flow)
     {
+        _settings.TargetPressurePsi = target;
         _settings.FlowMlMin = flow;
-        _settings.PressureLimitPsi = limit;
         _settings.Save(UserSettings.DefaultPath);
     }
 
@@ -417,8 +413,7 @@ public sealed partial class MainWindow : Window
     {
         SafetyBar.Title = verdict.Reason switch
         {
-            TripReason.OverPressure => "Pump stopped: pressure limit reached",
-            TripReason.FlowDeviation => "Pump stopped: flow no longer constant",
+            TripReason.OverPressure => $"Pump stopped: pressure reached {PumpConfig.PressureCapPsi:F0} psi",
             _ => "Pump fault",
         };
         SafetyBar.Message = verdict.Message;
@@ -592,14 +587,15 @@ public sealed partial class MainWindow : Window
         FaultGeometry geometry = CurrentGeometry;
         PressureText.Text = s is null ? EmptyReadout : s.PressurePsi.ToString("F0", CultureInfo.InvariantCulture);
         FlowText.Text = s is null ? EmptyReadout : s.Flow.ToString("F" + decimals, CultureInfo.InvariantCulture);
-        SetFlowText.Text = session is null ? EmptyReadout : session.FlowSetPoint.ToString("F" + decimals, CultureInfo.InvariantCulture);
+        TargetText.Text = session is null ? EmptyReadout : session.PressureSetPointPsi.ToString("F0", CultureInfo.InvariantCulture);
         ShearText.Text = s is null ? EmptyReadout : geometry.ShearStressMPa(s.PressurePsi).ToString("F2", CultureInfo.InvariantCulture);
         ShearCaptionText.Text = $"SHEAR STRESS · {geometry.Type.ToLabel()} {geometry.EffectiveThicknessM * 100:0} cm";
 
         PumpPressureSettingsText.Text = session is null
             ? "Not connected."
-            : $"On the pump now: HI PR {(s?.PressureLimitPsi ?? session.PressureLimitPsi):F0} psi, the stop limit · "
-              + $"PRESS {session.PressureSetPointPsi:F0} psi, the CP set point, pinned so it is never reached.";
+            : $"On the pump now: PRESS {session.PressureSetPointPsi:F0} psi, the target · "
+              + $"HI PR {(s?.PressureLimitPsi ?? PumpConfig.UpperLimitPsi):F0} psi, the stop limit (pinned) · "
+              + $"max flow {session.FlowLimit.ToString("F" + decimals, CultureInfo.InvariantCulture)} mL/min.";
 
         SetStateTile(session, s);
 
@@ -615,8 +611,9 @@ public sealed partial class MainWindow : Window
             _ = StopRecordingAsync();
         }
 
-        PressurePlot.ReferenceValue = session?.PressureLimitPsi;
-        FlowPlot.ReferenceValue = session?.FlowSetPoint;
+        PressurePlot.ReferenceValue = session?.PressureSetPointPsi;
+        PressurePlot.LimitValue = session is null ? null : s?.PressureLimitPsi ?? PumpConfig.UpperLimitPsi;
+        FlowPlot.ReferenceValue = session?.FlowLimit;
         PressurePlot.Refresh();
         FlowPlot.Refresh();
 

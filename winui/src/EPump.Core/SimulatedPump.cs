@@ -9,9 +9,11 @@ namespace EPump.Core;
 ///
 /// The hydraulics are a deliberately crude first-order model: the outlet pressure relaxes
 /// towards <c>flow × resistance</c>. The CP controller is modelled as "deliver FI until the
-/// pressure reaches PS, then deliver whatever holds PS", which is enough to exercise both the
-/// over-pressure trip and the flow-deviation trip. Raising <see cref="ResistancePsiPerMlMin"/>
-/// mid-run imitates a blockage.
+/// pressure reaches PS, then deliver whatever holds PS", which is enough to show the pump
+/// throttling to hold its target and to exercise the over-pressure stop. Raising
+/// <see cref="ResistancePsiPerMlMin"/> mid-run imitates a stiffer system or a blockage. The
+/// pump's own HI PR check only runs when a command arrives, so the simulated pressure can
+/// overshoot the limit by one poll's worth; the real pump checks continuously.
 /// </summary>
 public sealed class SimulatedPump : IPumpTransport
 {

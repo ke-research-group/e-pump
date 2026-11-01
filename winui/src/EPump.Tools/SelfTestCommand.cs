@@ -84,43 +84,25 @@ internal static class SelfTestCommand
 
     // ---------- safety ----------
 
-    private static PumpSample Sample(double t, double p, double flow, double set = 5, bool running = true, PumpFaults faults = default) =>
-        new(t, p, flow, set, 2700, running, faults, Leak: false);
+    private static PumpSample Sample(double t, double p, double flow, bool running = true, PumpFaults faults = default) =>
+        new(t, p, flow, FlowLimit: 5, PressureSetPointPsi: 2000, PressureLimitPsi: 2800, running, faults, Leak: false);
 
     private static void TestSafetyRules()
     {
-        Check("limit above the cap is refused", Throws<ArgumentOutOfRangeException>(() => new SafetyMonitor(2801)));
-        Check("zero limit is refused", Throws<ArgumentOutOfRangeException>(() => new SafetyMonitor(0)));
-        Check("limit at the cap is accepted", new SafetyMonitor(PumpConfig.PressureCapPsi).PressureLimitPsi == 2800);
+        Check("HI PR is pinned at the cap", PumpConfig.UpperLimitPsi == PumpConfig.PressureCapPsi && PumpConfig.PressureCapPsi == 2800);
+        Check("target above the cap is refused", Throws<ArgumentOutOfRangeException>(() => SafetyMonitor.ValidateTarget(2801)));
+        Check("zero target is refused", Throws<ArgumentOutOfRangeException>(() => SafetyMonitor.ValidateTarget(0)));
+        Check("target at the cap is accepted", SafetyMonitor.ValidateTarget(2800) == 2800);
 
-        var m = new SafetyMonitor(2700);
-        m.ArmGrace(1000);
-        Check("normal running is OK", !m.Evaluate(Sample(1001, 1500, 5)).Tripped);
-        Check("pressure at the limit trips", m.Evaluate(Sample(1002, 2700, 5)).Reason == TripReason.OverPressure);
-        Check("pressure above the limit trips even during the grace period", m.Evaluate(Sample(1003, 2750, 5)).Reason == TripReason.OverPressure);
-        Check("high pressure while stopped does not trip", !m.Evaluate(Sample(1004, 2750, 0, running: false)).Tripped);
+        var m = new SafetyMonitor();
+        Check("holding the target is OK", !m.Evaluate(Sample(1, 2000, 5)).Tripped);
+        Check("throttled flow is normal in constant-pressure mode", !m.Evaluate(Sample(2, 2000, 0.3)).Tripped);
+        Check("just below the cap is OK", !m.Evaluate(Sample(3, 2799, 1)).Tripped);
+        Check("pressure at the cap trips", m.Evaluate(Sample(4, 2800, 1)).Reason == TripReason.OverPressure);
+        Check("pressure above the cap trips", m.Evaluate(Sample(5, 2900, 1)).Reason == TripReason.OverPressure);
+        Check("high pressure while stopped does not trip", !m.Evaluate(Sample(6, 2900, 0, running: false)).Tripped);
 
-        m = new SafetyMonitor(2700);
-        m.ArmGrace(1000);
-        Check("low flow during the grace period is ignored", !m.Evaluate(Sample(1005, 2000, 1)).Tripped);
-        double t0 = 1000 + PumpConfig.FlowCheckGraceSeconds + 1;
-        bool tripped = false;
-        for (int i = 0; i < PumpConfig.FlowDeviationSamples - 1; i++)
-            tripped |= m.Evaluate(Sample(t0 + i, 2600, 4.5)).Tripped;
-        Check("low flow needs several consecutive samples", !tripped);
-        Check("persistent low flow trips as flow deviation",
-            m.Evaluate(Sample(t0 + 10, 2600, 4.5)).Reason == TripReason.FlowDeviation);
-
-        m = new SafetyMonitor(2700);
-        m.ArmGrace(0);
-        Check("flow within 5% is fine", !m.Evaluate(Sample(t0, 1500, 4.8)).Tripped && !m.Evaluate(Sample(t0 + 1, 1500, 4.8)).Tripped
-                                         && !m.Evaluate(Sample(t0 + 2, 1500, 4.8)).Tripped);
-        m.Evaluate(Sample(t0 + 3, 1500, 4.0));
-        m.Evaluate(Sample(t0 + 4, 1500, 4.0));
-        m.Evaluate(Sample(t0 + 5, 1500, 5.0));
-        Check("a recovered flow resets the count", !m.Evaluate(Sample(t0 + 6, 1500, 4.0)).Tripped);
-
-        m = new SafetyMonitor(2700);
+        m = new SafetyMonitor();
         var fault = new PumpFaults(false, true, false);
         Check("a pump fault is reported", m.Evaluate(Sample(1, 0, 0, running: false, faults: fault)).Reason == TripReason.PumpFault);
         Check("... once, not on every poll", !m.Evaluate(Sample(2, 0, 0, running: false, faults: fault)).Tripped);
@@ -179,9 +161,9 @@ internal static class SelfTestCommand
             using (var spool = new RecordingSpool(dir, manifest))
             {
                 spoolDir = spool.Directory;
-                spool.AppendEvent(new PumpEvent(1_790_000_000.5, EventKinds.PumpRun, "Run at 5 mL/min — limit 2700 psi"));
+                spool.AppendEvent(new PumpEvent(1_790_000_000.5, EventKinds.PumpRun, "Run: target 2000 psi — max flow 5 mL/min"));
                 for (int i = 0; i < 10; i++)
-                    spool.Append(new PumpSample(1_790_000_001 + i * 0.5, 100 * i, 5, 5, 2700, i < 8, new PumpFaults(false, i >= 8, false), false));
+                    spool.Append(new PumpSample(1_790_000_001 + i * 0.5, 100 * i, 5, 5, 2000, 2800, i < 8, new PumpFaults(false, i >= 8, false), false));
                 spool.AppendEvent(new PumpEvent(1_790_000_006, EventKinds.PumpFault, "upper pressure limit exceeded"));
             }
 
@@ -196,6 +178,9 @@ internal static class SelfTestCommand
             double[] t = npz.ReadFloat64Array("t_unix");
             Check("all samples saved", t.Length == 10 && t[0] == 1_790_000_001 && t[9] == 1_790_000_005.5);
             Check("pressure saved", npz.ReadFloat64Array("pressure_psi")[9] == 900);
+            Check("target, max flow and HI PR saved per sample",
+                npz.ReadFloat64Array("pressure_setpoint_psi")[0] == 2000 && npz.ReadFloat64Array("flow_limit_ml_min")[0] == 5
+                && npz.ReadFloat64Array("pressure_limit_psi")[0] == 2800);
             Check("shear stress saved with the recording's geometry",
                 Math.Abs(npz.ReadFloat64Array("shear_stress_mpa")[9] - new FaultGeometry(FaultType.OneD, 0.10).ShearStressMPa(900)) < 1e-9);
             Check("geometry recorded", npz.ReadString("fault_type") == "1D" && npz.ReadFloat64Array("fault_thickness_m") is [0.1]);
@@ -204,7 +189,7 @@ internal static class SelfTestCommand
             long[] over = npz.ReadInt64Array("fault_over_pressure");
             Check("flag values", running[7] == 1 && running[8] == 0 && over[8] == 1 && over[7] == 0);
             Check("events saved in order", npz.ReadStringArray("event_kind") is [EventKinds.PumpRun, EventKinds.PumpFault]);
-            Check("non-ASCII event text survives", npz.ReadStringArray("event_message")[0] == "Run at 5 mL/min — limit 2700 psi");
+            Check("non-ASCII event text survives", npz.ReadStringArray("event_message")[0] == "Run: target 2000 psi — max flow 5 mL/min");
             Check("start time scalar", npz.ReadFloat64Array("start_time_unix") is [1_790_000_000.25] && npz.GetHeader("start_time_unix").Shape.Length == 0);
             Check("serial and run", npz.ReadString("experiment_serial") == "0207" && npz.ReadInt64Array("run") is [5]);
             Check("pressure cap recorded", npz.ReadFloat64Array("pressure_cap_psi") is [2800.0]);
@@ -227,7 +212,7 @@ internal static class SelfTestCommand
         {
             var manifest = new RecordingManifest { ExperimentSerial = "0311", Run = 9, StartStamp = "20261102_090000" };
             var spool = new RecordingSpool(dir, manifest);
-            for (int i = 0; i < 4; i++) spool.Append(new PumpSample(i, i, 1, 1, 2700, true, default, false));
+            for (int i = 0; i < 4; i++) spool.Append(new PumpSample(i, i, 1, 1, 2000, 2800, true, default, false));
             spool.AppendEvent(new PumpEvent(0, EventKinds.PumpRun, "run"));
             spool.Close();
 
@@ -290,12 +275,12 @@ internal static class SelfTestCommand
         try
         {
             string path = Path.Combine(dir, "settings.json");
-            new UserSettings { Port = "COM7", FlowMlMin = 2.5, PressureLimitPsi = 2500 }.Save(path);
+            new UserSettings { Port = "COM7", FlowMlMin = 2.5, TargetPressurePsi = 2500 }.Save(path);
             UserSettings back = UserSettings.Load(path);
-            Check("settings round-trip", back.Port == "COM7" && back.FlowMlMin == 2.5 && back.PressureLimitPsi == 2500);
+            Check("settings round-trip", back.Port == "COM7" && back.FlowMlMin == 2.5 && back.TargetPressurePsi == 2500);
 
             File.WriteAllText(path, File.ReadAllText(path).Replace("2500", "9000"));
-            Check("an edited limit above the cap is not trusted", UserSettings.Load(path).PressureLimitPsi == PumpConfig.DefaultPressureLimitPsi);
+            Check("an edited target above the cap is not trusted", UserSettings.Load(path).TargetPressurePsi == PumpConfig.DefaultTargetPressurePsi);
         }
         finally
         {
@@ -307,45 +292,58 @@ internal static class SelfTestCommand
 
     private static async Task TestSessionAgainstSimulator()
     {
-        Check("connect refuses a limit above the cap",
-            await ThrowsAsync<ArgumentOutOfRangeException>(() => PumpSession.ConnectAsync(new SimulatedPump(), 3000)));
-
         var sim = new SimulatedPump { TimeConstantSec = 0.3 };
         var events = new List<PumpEvent>();
         var trips = new List<SafetyVerdict>();
 
-        await using (PumpSession session = await PumpSession.ConnectAsync(sim, 2700))
+        await using (PumpSession session = await PumpSession.ConnectAsync(sim))
         {
             session.EventLogged += e => { lock (events) events.Add(e); };
             session.SafetyTripped += v => { lock (trips) trips.Add(v); };
 
-            Check("connect pins the set point at the cap", sim.PressureSetPoint == PumpConfig.PressureSetPointPsi);
-            Check("connect applies the limit", sim.UpperLimit == 2700);
-            Check("connect reads the pump's flow resolution", session.Info.FlowDecimals == 3 && session.Info.MaxFlow == 12);
+            Check("connect pins HI PR at the cap", sim.UpperLimit == PumpConfig.UpperLimitPsi);
+            Check("connect reads the pump's target and flow resolution",
+                session.PressureSetPointPsi == sim.PressureSetPoint && session.Info.FlowDecimals == 3 && session.Info.MaxFlow == 12);
 
-            Check("flow above the pump's maximum is refused",
-                await ThrowsAsync<ArgumentOutOfRangeException>(() => session.StartPumpAsync(20)));
+            Check("a target above the cap is refused",
+                await ThrowsAsync<ArgumentOutOfRangeException>(() => session.StartPumpAsync(3000, 5)));
+            Check("a max flow above the pump's maximum is refused",
+                await ThrowsAsync<ArgumentOutOfRangeException>(() => session.StartPumpAsync(2000, 20)));
+            Check("nothing was started by a refused run", !sim.Running);
 
-            await session.StartPumpAsync(5.0);
+            await session.StartPumpAsync(2000, 5.0);
             Check("pump runs", sim.Running);
+            Check("the target was written to PRESS", sim.PressureSetPoint == 2000 && session.PressureSetPointPsi == 2000);
             List<string> sent = sim.ReceivedCommands();
-            Check("Run was sent after the settings", sent.LastIndexOf("RU") > sent.LastIndexOf("FI05000") && sent.Contains("FI05000"));
+            Check("Run was sent after the settings",
+                sent.Contains("PS02000") && sent.Contains("FI05000") && sent.LastIndexOf("RU") > sent.LastIndexOf("FI05000"));
 
-            await WaitFor(() => session.LatestSample is { Running: true, PressurePsi: > 1000 }, 5);
-            Check("polling reports the running pump", session.LatestSample is { Running: true, PressurePsi: > 1000 });
+            // 5 mL/min into 300 psi per mL/min would only make 1500 psi: the pump runs at its max flow.
+            await WaitFor(() => session.LatestSample is { Running: true, PressurePsi: > 1300 }, 5);
+            Check("below the target the pump delivers its max flow", session.LatestSample is { Running: true, Flow: 5.0 });
 
-            // Someone raises the limit on the keypad: it must be put back.
-            sim.Exchange("UP09000", TimeSpan.FromSeconds(1));
-            await WaitFor(() => sim.UpperLimit == 2700, 5);
-            Check("a limit raised on the keypad is restored", sim.UpperLimit == 2700);
-
-            // A blockage: pressure heads for 6000 psi.
+            // A stiffer system: the pump throttles to hold 2000 psi. That is the job, not a fault.
             sim.ResistancePsiPerMlMin = 1200;
+            await WaitFor(() => session.LatestSample is { PressurePsi: > 1950 }, 5);
+            Check("the pump holds the target by throttling the flow",
+                session.LatestSample is { Running: true, PressurePsi: > 1950 and <= 2001, Flow: < 2 });
+            Check("throttling does not trip anything", trips.Count == 0 && sim.Running);
+
+            await session.SetTargetPressureAsync(2500);
+            Check("the target can be changed while running", sim.PressureSetPoint == 2500 && sim.Running);
+
+            // Someone raises HI PR on the keypad: it must be put back.
+            sim.Exchange("UP09000", TimeSpan.FromSeconds(1));
+            await WaitFor(() => sim.UpperLimit == PumpConfig.UpperLimitPsi, 5);
+            Check("HI PR raised on the keypad is restored", sim.UpperLimit == PumpConfig.UpperLimitPsi);
+
+            // Someone raises PRESS past the cap on the keypad: the pressure climbs through 2800.
+            sim.Exchange("PS05000", TimeSpan.FromSeconds(1));
             await WaitFor(() => !sim.Running, 8);
-            Check("over-pressure stops the pump", !sim.Running);
+            Check("pressure at the cap stops the pump", !sim.Running);
             await WaitFor(() => trips.Count > 0, 3);
             Check("the stop is reported", trips.Count > 0);
-            Check("pressure never far beyond the limit", sim.Pressure < 2700 * 1.1);
+            Check("pressure never far beyond the cap", sim.Pressure < PumpConfig.PressureCapPsi * 1.1);
 
             sim.ResistancePsiPerMlMin = 300;
             await session.ClearFaultsAsync();
@@ -368,6 +366,7 @@ internal static class SelfTestCommand
                 events.Any(e => e.Kind == EventKinds.PumpRun)
                 && events.Any(e => e.Kind is EventKinds.SafetyOverPressure or EventKinds.PumpFault));
             Check("the keypad change is in the event log", events.Any(e => e.Kind == EventKinds.LimitRestored));
+            Check("the target change is in the event log", events.Any(e => e.Kind == EventKinds.TargetSet));
         }
     }
 

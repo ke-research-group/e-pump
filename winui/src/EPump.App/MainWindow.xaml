@@ -106,12 +106,12 @@
                             </StackPanel>
                         </Border>
 
-                        <!-- flow and limits -->
+                        <!-- target pressure and max flow -->
                         <Border Style="{StaticResource CardStyle}">
                             <StackPanel Spacing="10">
                                 <StackPanel Orientation="Horizontal" Spacing="8">
                                     <FontIcon Glyph="&#xE713;" FontSize="16" Foreground="{ThemeResource AccentTextFillColorPrimaryBrush}" VerticalAlignment="Center" />
-                                    <TextBlock Text="Constant flow" Style="{StaticResource CardHeaderStyle}" />
+                                    <TextBlock Text="Constant pressure" Style="{StaticResource CardHeaderStyle}" />
                                 </StackPanel>
 
                                 <Grid ColumnSpacing="10">
@@ -119,8 +119,8 @@
                                         <ColumnDefinition Width="*" />
                                         <ColumnDefinition Width="*" />
                                     </Grid.ColumnDefinitions>
-                                    <NumberBox x:Name="FlowBox" Grid.Column="0" Header="Flow (mL/min)" SpinButtonPlacementMode="Compact" SmallChange="0.1" LargeChange="1" />
-                                    <NumberBox x:Name="LimitBox" Grid.Column="1" Header="Limit · HI PR (psi)" SpinButtonPlacementMode="Compact" SmallChange="50" LargeChange="500" />
+                                    <NumberBox x:Name="TargetBox" Grid.Column="0" Header="Target · PRESS (psi)" SpinButtonPlacementMode="Compact" SmallChange="50" LargeChange="500" />
+                                    <NumberBox x:Name="FlowBox" Grid.Column="1" Header="Max flow (mL/min)" SpinButtonPlacementMode="Compact" SmallChange="0.1" LargeChange="1" />
                                 </Grid>
 
                                 <!-- What the pump itself reports holding, to compare with its front panel. -->
@@ -129,7 +129,7 @@
                                 </Border>
 
                                 <Button x:Name="ApplyButton" Content="Apply to pump" HorizontalAlignment="Stretch" IsEnabled="False" Click="OnApply"
-                                        ToolTipService.ToolTip="Send the flow and the pressure limit now. Works while the pump is running." />
+                                        ToolTipService.ToolTip="Send the target pressure and the max flow now. Works while the pump is running." />
 
                                 <ToggleSwitch x:Name="KeypadLockToggle" Header="Lock the pump's front-panel keys while connected" OnContent="Locked" OffContent="Unlocked" Toggled="OnKeypadLockToggled" />
 
@@ -208,7 +208,7 @@
                         </Grid.ColumnDefinitions>
 
                         <Button x:Name="RunPumpButton" Grid.Column="0" Style="{StaticResource AccentButtonStyle}" HorizontalAlignment="Stretch" Height="40" IsEnabled="False" Click="OnRunPump"
-                                ToolTipService.ToolTip="Start recording, send the limit, the pinned set point and the flow, confirm them, then start the pump. Needs an output folder.">
+                                ToolTipService.ToolTip="Start recording, send HI PR, the target pressure and the max flow, confirm them, then start the pump. Needs an output folder.">
                             <StackPanel Orientation="Horizontal" Spacing="8">
                                 <FontIcon Glyph="&#xE768;" FontSize="14" />
                                 <TextBlock Text="Run &amp; record" />
@@ -289,10 +289,10 @@
 
                     <Border Grid.Column="3" Style="{StaticResource SubtleCardStyle}">
                         <StackPanel Spacing="2">
-                            <TextBlock Text="SET FLOW" Style="{StaticResource ReadoutCaptionStyle}" />
+                            <TextBlock Text="TARGET · PRESS" Style="{StaticResource ReadoutCaptionStyle}" />
                             <StackPanel Orientation="Horizontal">
-                                <TextBlock x:Name="SetFlowText" Text="—" Style="{StaticResource ReadoutValueStyle}" />
-                                <TextBlock Text="mL/min" Style="{StaticResource ReadoutUnitStyle}" />
+                                <TextBlock x:Name="TargetText" Text="—" Style="{StaticResource ReadoutValueStyle}" />
+                                <TextBlock Text="psi" Style="{StaticResource ReadoutUnitStyle}" />
                             </StackPanel>
                         </StackPanel>
                     </Border>

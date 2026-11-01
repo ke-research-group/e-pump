@@ -9,34 +9,26 @@ public static class PumpConfig
     // ---- safety ----
 
     /// <summary>
-    /// Absolute ceiling for anything pressure-related in this application. The upper pressure
-    /// limit the operator types can only be lower than this, and the constant-pressure set point
-    /// is pinned to it. 2800 psi is what the lab's plumbing is rated for.
+    /// Absolute ceiling for anything pressure-related in this application. 2800 psi is what the
+    /// lab's plumbing is rated for. The pump's upper pressure limit (front panel HI PR) is pinned
+    /// here, and the target pressure the operator sets can never be above it.
     /// </summary>
     public const double PressureCapPsi = 2800;
 
-    /// <summary>Default upper pressure limit: a little headroom below the cap, because the pump trips slightly above its limit.</summary>
-    public const double DefaultPressureLimitPsi = 2700;
+    /// <summary>
+    /// HI PR, the pressure at which the pump stops itself and faults. Pinned at the cap and
+    /// never offered to the operator; the software stops the pump at the same pressure.
+    /// </summary>
+    public const double UpperLimitPsi = PressureCapPsi;
 
     /// <summary>
-    /// The ReaXus CP Class has no constant-flow mode. It always adjusts flow, up to the FI limit,
-    /// to reach the PS set point. Pinning PS at the cap means the set point is never reached
-    /// before the upper pressure limit stops the pump, so in practice the pump delivers exactly
-    /// FI -- constant flow -- and is never allowed to throttle itself.
+    /// The pump runs in its constant-pressure mode: it varies its flow, up to the FI maximum,
+    /// to hold the PS target (front panel PRESS). These are the defaults before the operator
+    /// has set anything.
     /// </summary>
-    public const double PressureSetPointPsi = PressureCapPsi;
+    public const double DefaultTargetPressurePsi = 1000;
 
-    /// <summary>
-    /// A running pump whose reported flow falls more than this fraction below the set point is
-    /// stopped: it means the CP controller has started throttling, so the flow is no longer constant.
-    /// </summary>
-    public const double FlowDeviationTolerance = 0.05;
-
-    /// <summary>Consecutive deviating samples needed before the flow check trips, so a single noisy reading cannot stop a run.</summary>
-    public const int FlowDeviationSamples = 3;
-
-    /// <summary>Time after Run, or after a flow change, during which the flow check is suspended while the pump ramps.</summary>
-    public const double FlowCheckGraceSeconds = 10;
+    public const double DefaultMaxFlowMlMin = 1.0;
 
     /// <summary>Consecutive failed poll cycles before the link is reported as lost.</summary>
     public const int CommLossCycles = 3;

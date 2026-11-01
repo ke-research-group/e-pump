@@ -51,10 +51,10 @@ internal static class PingCommand
             bool? leak = await client.ReadLeakAsync();
 
             Console.WriteLine($"Pressure    : {p:F0} psi");
-            Console.WriteLine($"Flow        : {f} mL/min (set point {s.FlowSetPoint})");
+            Console.WriteLine($"Flow        : {f} mL/min (max {s.FlowSetPoint})");
             Console.WriteLine($"Running     : {s.Running}");
-            Console.WriteLine($"Limits      : upper {s.UpperLimit:F0} psi, lower {s.LowerLimit:F0} psi");
-            Console.WriteLine($"CP set point: {ps:F0} psi");
+            Console.WriteLine($"PRESS target: {ps:F0} psi");
+            Console.WriteLine($"HI PR       : {s.UpperLimit:F0} psi (LO PR {s.LowerLimit:F0} psi)");
             Console.WriteLine($"Faults      : {(faults.Any ? SafetyMonitor.DescribeFaults(faults) : "none")}");
             Console.WriteLine($"Leak        : {(leak is null ? "no sensor" : leak.Value ? "LEAK DETECTED" : "dry")}");
             return 0;
