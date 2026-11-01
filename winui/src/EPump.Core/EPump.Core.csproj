@@ -1,0 +1,16 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <IsAotCompatible>true</IsAotCompatible>
+    <!-- Deliberately platform-neutral: the protocol, the safety logic, the simulator and the
+         .npy/.npz container build and run on any OS, so they stay testable from a Mac. -->
+    <RootNamespace>EPump.Core</RootNamespace>
+    <AssemblyName>EPump.Core</AssemblyName>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="System.IO.Ports" Version="8.0.0" />
+  </ItemGroup>
+
+</Project>

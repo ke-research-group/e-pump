@@ -1,0 +1,12 @@
+# macOS
+.DS_Store
+
+# NPZ
+*.npz
+
+# .NET / WinUI
+bin/
+obj/
+winui/artifacts/
+*.user
+.vs/

@@ -1,0 +1,180 @@
+# Builds the x86-64 Windows executable of the ReaXus CP pump application.
+#
+# WinUI 3 cannot be cross-compiled from macOS or Linux -- the Windows App SDK build chain is
+# Windows-only -- so this workflow is how a Windows binary gets produced. Download it from the
+# run's "Artifacts" section, or from Releases for a tagged build. Same layout as the NI6451
+# application's workflow.
+name: Build WinUI (x64)
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'winui/**'
+      - '.github/workflows/build-winui.yml'
+    tags:
+      - 'v*'
+  pull_request:
+    branches: [main]
+    paths:
+      - 'winui/**'
+      - '.github/workflows/build-winui.yml'
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      # Every dotnet invocation runs from winui/, so winui/global.json selects the .NET 8 SDK.
+      # Windows App SDK 1.6 looks for its PRI build task under that SDK's layout.
+      - name: Restore
+        working-directory: winui
+        run: dotnet restore EPump.sln
+
+      - name: Self-test (protocol, safety rules, simulator session, .npz, recovery, naming)
+        working-directory: winui
+        run: dotnet run --project src/EPump.Tools/EPump.Tools.csproj -c Release -- selftest
+
+      # A real recording from the simulated pump, loaded with NumPy the way analysis code will.
+      - name: Simulated recording, read back with NumPy
+        working-directory: winui
+        shell: pwsh
+        run: |
+          dotnet run --project src/EPump.Tools/EPump.Tools.csproj -c Release -- simulate --out ../artifacts/sample-recording --seconds 10
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          python -m pip install --quiet numpy
+          python build/check_npz.py ../artifacts/sample-recording
+
+      - name: Publish x64
+        working-directory: winui
+        run: >
+          dotnet publish src/EPump.App/EPump.App.csproj
+          -c Release -r win-x64 -p:Platform=x64 --self-contained true
+          -o ../artifacts/win-x64
+
+      # The CLI has no XAML, so it can be a single native executable.
+      - name: Publish the command line tool (Native AOT, single exe)
+        working-directory: winui
+        run: >
+          dotnet publish src/EPump.Tools/EPump.Tools.csproj
+          -c Release -r win-x64 -p:PublishAot=true
+          -o ../artifacts/win-x64-tools
+
+      - name: Upload the application
+        uses: actions/upload-artifact@v4
+        with:
+          name: EPump-win-x64
+          path: artifacts/win-x64
+          if-no-files-found: error
+          retention-days: 90
+
+      - name: Upload the command line tool
+        uses: actions/upload-artifact@v4
+        with:
+          name: epump-cli-win-x64
+          path: artifacts/win-x64-tools
+          if-no-files-found: error
+          retention-days: 90
+
+      - name: Upload the simulated recording
+        uses: actions/upload-artifact@v4
+        with:
+          name: sample-recording
+          path: artifacts/sample-recording
+          if-no-files-found: error
+          retention-days: 30
+
+  # Native AOT build of the application: the app and the .NET runtime compiled into EPump.exe.
+  # A separate job, so a problem in the AOT toolchain never blocks the standard build.
+  build-aot:
+    runs-on: windows-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+
+      - name: Restore
+        working-directory: winui
+        run: dotnet restore EPump.sln
+
+      - name: Publish x64 (Native AOT)
+        working-directory: winui
+        run: >
+          dotnet publish src/EPump.App/EPump.App.csproj
+          -c Release -r win-x64 -p:Platform=x64 -p:PublishAot=true
+          -o ../artifacts/win-x64-aot
+
+      - name: Separate the debug symbols
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force artifacts/win-x64-aot-symbols | Out-Null
+          Get-ChildItem artifacts/win-x64-aot -Filter *.pdb | Move-Item -Destination artifacts/win-x64-aot-symbols
+          $files = Get-ChildItem artifacts/win-x64-aot -Recurse -File
+          "{0} files, {1:N0} MB" -f $files.Count, (($files | Measure-Object Length -Sum).Sum / 1MB)
+
+      - name: Upload the AOT application
+        uses: actions/upload-artifact@v4
+        with:
+          name: EPump-win-x64-aot
+          path: artifacts/win-x64-aot
+          if-no-files-found: error
+          retention-days: 90
+
+  # A tagged build additionally gets every flavour attached to a permanent GitHub Release.
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [build, build-aot]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Zip each flavour
+        run: |
+          set -e
+          v="$GITHUB_REF_NAME"
+          (cd artifacts/EPump-win-x64-aot   && zip -qr "../EPump-$v-win-x64-aot.zip" .)
+          (cd artifacts/EPump-win-x64       && zip -qr "../EPump-$v-win-x64.zip" .)
+          (cd artifacts/epump-cli-win-x64   && zip -qr "../epump-cli-$v-win-x64.zip" .)
+          ls -lh artifacts/*.zip
+
+      - name: Create or update the Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -e
+          v="$GITHUB_REF_NAME"
+          cat > notes.md <<EOF
+          | File | What it is |
+          | --- | --- |
+          | \`EPump-$v-win-x64-aot.zip\` | **Recommended.** Native AOT build of the app. |
+          | \`EPump-$v-win-x64.zip\` | Standard self-contained .NET build. Same behaviour, more files. Fallback. |
+          | \`epump-cli-$v-win-x64.zip\` | The command line tool as a single exe: \`ports\`, \`ping\`, \`dump\`, \`recover\`, \`simulate\`, \`selftest\`. |
+
+          Unpack the whole folder and run \`EPump.exe\`. Requires Windows 10 1809+ x64, plus the Teledyne SSI USB driver for a micro-USB connection.
+
+          If the window does not appear, send \`%LOCALAPPDATA%\\EPump\\startup.log\`.
+          EOF
+          if gh release view "$v" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release upload "$v" artifacts/*.zip --clobber --repo "$GITHUB_REPOSITORY"
+          else
+            gh release create "$v" artifacts/*.zip --title "$v" --notes-file notes.md --repo "$GITHUB_REPOSITORY"
+          fi

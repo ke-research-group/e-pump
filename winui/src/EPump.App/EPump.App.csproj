@@ -1,0 +1,56 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net8.0-windows10.0.19041.0</TargetFramework>
+    <TargetPlatformMinVersion>10.0.17763.0</TargetPlatformMinVersion>
+    <RootNamespace>EPump.App</RootNamespace>
+    <AssemblyName>EPump</AssemblyName>
+    <ApplicationManifest>app.manifest</ApplicationManifest>
+
+    <!-- WinUI 3, deployed unpackaged and self-contained, exactly like the NI6451 application:
+         the output is a plain, double-clickable EPump.exe with the Windows App SDK and the .NET
+         runtime alongside it. The lab machine needs nothing installed except the Teledyne SSI
+         USB driver, if the pump is connected over micro-USB. -->
+    <UseWinUI>true</UseWinUI>
+    <!-- Required even though the app ships unpackaged: this is what wires up the MSIX/PRI build
+         tasks that MrtCore.PriGen.targets loads. Without it the build fails with MSB4062. -->
+    <EnableMsixTooling>true</EnableMsixTooling>
+    <WindowsPackageType>None</WindowsPackageType>
+    <WindowsAppSDKSelfContained>true</WindowsAppSDKSelfContained>
+    <SelfContained>true</SelfContained>
+
+    <!-- Program.cs supplies Main so startup can be logged and a failure shown; see StartupLog. -->
+    <DefineConstants>$(DefineConstants);DISABLE_XAML_GENERATED_MAIN</DefineConstants>
+
+    <Platforms>x64</Platforms>
+    <RuntimeIdentifier>win-x64</RuntimeIdentifier>
+    <PublishReadyToRun>false</PublishReadyToRun>
+    <DefaultLanguage>en-US</DefaultLanguage>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- The same matched pair as NI6451: Win2D 1.3.2 declares a dependency on exactly this App
+         SDK version, and mixing package generations makes the XAML compiler fail silently. -->
+    <PackageReference Include="Microsoft.WindowsAppSDK" Version="1.6.241114003" />
+    <PackageReference Include="Microsoft.Graphics.Win2D" Version="1.3.2" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\EPump.Core\EPump.Core.csproj" />
+  </ItemGroup>
+
+  <!-- Keep English and Traditional Chinese App SDK resources and delete the other ninety-odd
+       language folders, as NI6451 does. -->
+  <Target Name="TrimAppSdkLanguageFolders" AfterTargets="Publish" Condition="'$(PublishDir)' != ''">
+    <ItemGroup>
+      <_AppSdkMui Include="$(PublishDir)*\Microsoft.ui.xaml.dll.mui" />
+      <_AppSdkMuiDir Include="@(_AppSdkMui->'%(RootDir)%(Directory)')" />
+      <_AppSdkMuiDirToRemove Include="@(_AppSdkMuiDir)"
+        Condition="!$([System.String]::Copy('%(Identity)').ToLowerInvariant().TrimEnd('\').EndsWith('en-us')) and !$([System.String]::Copy('%(Identity)').ToLowerInvariant().TrimEnd('\').EndsWith('zh-tw'))" />
+    </ItemGroup>
+    <RemoveDir Directories="@(_AppSdkMuiDirToRemove)" />
+    <Message Importance="high" Text="Removed @(_AppSdkMuiDirToRemove->Count()) App SDK language folders from the publish output." />
+  </Target>
+
+</Project>
